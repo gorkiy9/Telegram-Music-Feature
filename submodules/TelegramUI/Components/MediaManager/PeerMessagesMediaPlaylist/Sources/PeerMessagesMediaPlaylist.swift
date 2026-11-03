@@ -135,7 +135,7 @@ public final class MessageMediaPlaylistItem: SharedMediaPlaylistItem {
                             albumArt = SharedMediaPlaybackAlbumArt(thumbnailResource: ExternalMusicAlbumArtResource(file: .message(message: MessageReference(self.message), media: file), title: updatedTitle ?? "", performer: updatedPerformer ?? "", isThumbnail: true), fullSizeResource: ExternalMusicAlbumArtResource(file: .message(message: MessageReference(self.message), media: file), title: updatedTitle ?? "", performer: updatedPerformer ?? "", isThumbnail: false))
                         }
                         
-                        displayData = SharedMediaPlaybackDisplayData.music(title: updatedTitle, performer: updatedPerformer, albumArt: albumArt, long: CGFloat(duration) > 10.0 * 60.0, caption: caption)
+                        displayData = SharedMediaPlaybackDisplayData.music(title: updatedTitle.flatMap(audioTitleWithoutFileExtension), performer: updatedPerformer, albumArt: albumArt, long: CGFloat(duration) > 10.0 * 60.0, caption: caption)
                     }
                     return displayData
                 case let .Video(_, _, flags, _, _, _):
@@ -149,7 +149,7 @@ public final class MessageMediaPlaylistItem: SharedMediaPlaylistItem {
                 }
             }
             
-            return SharedMediaPlaybackDisplayData.music(title: file.fileName ?? "", performer: self.message.effectiveAuthor?.debugDisplayTitle ?? "", albumArt: nil, long: false, caption: caption)
+            return SharedMediaPlaybackDisplayData.music(title: audioTitleWithoutFileExtension(file.fileName ?? ""), performer: self.message.effectiveAuthor?.debugDisplayTitle ?? "", albumArt: nil, long: false, caption: caption)
         }
         return nil
     }()

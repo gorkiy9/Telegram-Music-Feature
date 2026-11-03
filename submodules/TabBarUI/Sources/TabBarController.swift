@@ -85,6 +85,7 @@ open class TabBarControllerImpl: ViewController, TabBarController {
     }
     
     public var currentController: ViewController?
+    public var currentControllerUpdated: ((_ previous: ViewController?, _ current: ViewController?) -> Void)?
     
     override public var transitionNavigationBar: NavigationBar? {
         return self.currentController?.navigationBar
@@ -302,6 +303,7 @@ open class TabBarControllerImpl: ViewController, TabBarController {
         if let currentView = self.currentController?.view {
             transitionScale = (currentView.frame.height - 3.0) / currentView.frame.height
         }
+        let previousController = self.currentController
         if let currentController = self.currentController {
             currentController.willMove(toParent: nil)
             currentController.tabBarSearchStateUpdated = nil
@@ -323,6 +325,7 @@ open class TabBarControllerImpl: ViewController, TabBarController {
         if let _selectedIndex = self._selectedIndex, _selectedIndex < self.controllers.count {
             self.currentController = self.controllers[_selectedIndex]
         }
+        self.currentControllerUpdated?(previousController, self.currentController)
 
         if let currentController = self.currentController {
             currentController.willMove(toParent: self)

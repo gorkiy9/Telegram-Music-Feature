@@ -17,6 +17,7 @@ import PasswordSetupUI
 import InstantPageCache
 import WalletContext
 import UndoUI
+import MusicScreen
 
 extension PeerInfoScreenNode {
     func openSettings(section: PeerInfoSettingsSection) {
@@ -83,6 +84,8 @@ extension PeerInfoScreenNode {
             })
         case .recentCalls:
             push(CallListController(context: context, mode: .navigation))
+        case .music:
+            push(MusicScreen(context: self.context, mode: .navigation))
         case .devices:
             let _ = (self.activeSessionsContextAndCount.get()
             |> take(1)

@@ -34,6 +34,7 @@ public class ItemListSwitchItem: ListViewItem, ItemListItem {
     let disableLeadingInset: Bool
     let maximumNumberOfLines: Int
     let noCorners: Bool
+    let additionalSideInset: CGFloat
     public let sectionId: ItemListSectionId
     let style: ItemListStyle
     let updated: (Bool) -> Void
@@ -41,7 +42,7 @@ public class ItemListSwitchItem: ListViewItem, ItemListItem {
     let action: (() -> Void)?
     public let tag: ItemListItemTag?
     
-    public init(presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, icon: UIImage? = nil, title: String, text: String? = nil, textColor: TextColor = .primary, titleBadgeComponent: AnyComponent<Empty>? = nil, value: Bool, type: ItemListSwitchItemNodeType = .regular, enableInteractiveChanges: Bool = true, enabled: Bool = true, displayLocked: Bool = false, disableLeadingInset: Bool = false, maximumNumberOfLines: Int = 1, noCorners: Bool = false, sectionId: ItemListSectionId, style: ItemListStyle, updated: @escaping (Bool) -> Void, activatedWhileDisabled: @escaping () -> Void = {}, action: (() -> Void)? = nil, tag: ItemListItemTag? = nil) {
+    public init(presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, icon: UIImage? = nil, title: String, text: String? = nil, textColor: TextColor = .primary, titleBadgeComponent: AnyComponent<Empty>? = nil, value: Bool, type: ItemListSwitchItemNodeType = .regular, enableInteractiveChanges: Bool = true, enabled: Bool = true, displayLocked: Bool = false, disableLeadingInset: Bool = false, maximumNumberOfLines: Int = 1, noCorners: Bool = false, additionalSideInset: CGFloat = 0.0, sectionId: ItemListSectionId, style: ItemListStyle, updated: @escaping (Bool) -> Void, activatedWhileDisabled: @escaping () -> Void = {}, action: (() -> Void)? = nil, tag: ItemListItemTag? = nil) {
         self.presentationData = presentationData
         self.systemStyle = systemStyle
         self.icon = icon
@@ -57,6 +58,7 @@ public class ItemListSwitchItem: ListViewItem, ItemListItem {
         self.disableLeadingInset = disableLeadingInset
         self.maximumNumberOfLines = maximumNumberOfLines
         self.noCorners = noCorners
+        self.additionalSideInset = additionalSideInset
         self.sectionId = sectionId
         self.style = style
         self.updated = updated
@@ -277,7 +279,8 @@ public class ItemListSwitchItemNode: ListViewItemNode, ItemListItemNode {
         let currentItem = self.item
         var currentDisabledOverlayNode = self.disabledOverlayNode
         
-        return { [weak self] item, params, neighbors in
+        return { [weak self] item, listParams, neighbors in
+            let params = ListViewItemLayoutParams(width: listParams.width, leftInset: listParams.leftInset + item.additionalSideInset, rightInset: listParams.rightInset + item.additionalSideInset, availableHeight: listParams.availableHeight, isStandalone: listParams.isStandalone)
             var contentSize: CGSize
             var insets: UIEdgeInsets
             let separatorHeight = UIScreenPixel
@@ -499,10 +502,10 @@ public class ItemListSwitchItemNode: ListViewItemNode, ItemListItemNode {
                             
                             strongSelf.maskNode.image = hasCorners ? PresentationResourcesItemList.cornersImage(item.presentationData.theme, top: hasTopCorners, bottom: hasBottomCorners, glass: item.systemStyle == .glass) : nil
                             
-                            transition.updateFrame(node: strongSelf.backgroundNode, frame: CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight))))
-                            transition.updateFrame(node: strongSelf.highlightNode, frame: CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight))))
+                            let backgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight)))
+                            transition.updateFrame(node: strongSelf.backgroundNode, frame: backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0))
+                            transition.updateFrame(node: strongSelf.highlightNode, frame: backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0))
                             // Per side: the margins differ beside iPhone Duo's strip; equal margins give the symmetric frame.
-                            let backgroundFrame = strongSelf.backgroundNode.frame
                             transition.updateFrame(node: strongSelf.maskNode, frame: CGRect(x: backgroundFrame.minX + params.leftInset, y: backgroundFrame.minY, width: backgroundFrame.width - params.leftInset - params.rightInset, height: backgroundFrame.height))
                             transition.updateFrame(node: strongSelf.topStripeNode, frame: CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: layoutSize.width, height: separatorHeight)))
                             transition.updateFrame(node: strongSelf.bottomStripeNode, frame: CGRect(origin: CGPoint(x: bottomStripeInset, y: contentSize.height - separatorHeight), size: CGSize(width: layoutSize.width - params.rightInset - bottomStripeInset - separatorRightInset, height: separatorHeight)))

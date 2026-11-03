@@ -55,6 +55,23 @@ public final class ListMessageItemInteraction {
     })
 }
 
+/// What an audio row says under its title. `.performer` shows the performer alone, or the size without one, and hides the date.
+public enum ListMessageItemAudioInfo {
+    case `default`
+    case performer
+}
+
+/// A swipe action of a row: `left` options are revealed by a swipe to the right, `right` ones by a swipe to the left.
+public struct ListMessageItemRevealOption {
+    public let option: ItemListRevealOption
+    public let action: () -> Void
+
+    public init(option: ItemListRevealOption, action: @escaping () -> Void) {
+        self.option = option
+        self.action = action
+    }
+}
+
 public enum ListMessageItemSelectionSide {
     case left
     case right
@@ -79,8 +96,14 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let isStoryMusic: Bool
     let isAttachMusic: Bool
     let displayFileInfo: Bool
+    let audioInfo: ListMessageItemAudioInfo
+    let hidesAudioFileExtension: Bool
+    let additionalSideInset: CGFloat
+    let blockTopInset: CGFloat
     let displayBackground: Bool
     let canReorder: Bool
+    let leftRevealOptions: [ListMessageItemRevealOption]
+    let rightRevealOptions: [ListMessageItemRevealOption]
     let style: ItemListStyle
     
     let header: ListViewItemHeader?
@@ -120,9 +143,15 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         isStoryMusic: Bool = false,
         isAttachMusic: Bool = false,
         displayFileInfo: Bool = true,
+        audioInfo: ListMessageItemAudioInfo = .default,
+        hidesAudioFileExtension: Bool = false,
+        additionalSideInset: CGFloat = 0.0,
+        blockTopInset: CGFloat = 0.0,
         displayBackground: Bool = false,
         canReorder: Bool = false,
         richMessageQueueId: EngineMessage.Id? = nil,
+        leftRevealOptions: [ListMessageItemRevealOption] = [],
+        rightRevealOptions: [ListMessageItemRevealOption] = [],
         style: ItemListStyle = .plain,
         sectionId: ItemListSectionId = 0
     ) {
@@ -150,8 +179,14 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.isStoryMusic = isStoryMusic
         self.isAttachMusic = isAttachMusic
         self.displayFileInfo = displayFileInfo
+        self.audioInfo = audioInfo
+        self.hidesAudioFileExtension = hidesAudioFileExtension
+        self.additionalSideInset = additionalSideInset
+        self.blockTopInset = blockTopInset
         self.displayBackground = displayBackground
         self.canReorder = canReorder
+        self.leftRevealOptions = leftRevealOptions
+        self.rightRevealOptions = rightRevealOptions
         self.style = style
         self.sectionId = sectionId
     }
@@ -185,22 +220,8 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
             
             let nodeLayout = node.asyncLayout()
             
-            var topMerged = false
-            if neighbors.previous != nil {
-                if let previousItem = neighbors.previous?.base(ItemListNeighborFacet.self), previousItem.sectionId == self.sectionId && !previousItem.isAlwaysPlain {
-                    topMerged = true
-                }
-            }
-            
-            var bottomMerged = false
-            if neighbors.next != nil {
-                if let nextItem = neighbors.next?.base(ItemListNeighborFacet.self), nextItem.sectionId == self.sectionId && !nextItem.isAlwaysPlain {
-                    bottomMerged = true
-                }
-            }
-            
-            
-            let (top, bottom, dateAtBottom) = (topMerged, bottomMerged, self.getDateAtBottom(top: neighbors.previous))
+            let (top, bottom) = self.merged(neighbors: neighbors)
+            let dateAtBottom = self.getDateAtBottom(top: neighbors.previous)
             let (layout, apply) = nodeLayout(self, params, top, bottom, dateAtBottom)
             
             node.updateSelectionState(animated: false)
@@ -232,22 +253,10 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
                 
                 let nodeLayout = nodeValue.asyncLayout()
                 
-                var topMerged = false
-                if neighbors.previous != nil {
-                    if let previousItem = neighbors.previous?.base(ItemListNeighborFacet.self), previousItem.sectionId == self.sectionId && !previousItem.isAlwaysPlain {
-                        topMerged = true
-                    }
-                }
-                
-                var bottomMerged = false
-                if neighbors.next != nil {
-                    if let nextItem = neighbors.next?.base(ItemListNeighborFacet.self), nextItem.sectionId == self.sectionId && !nextItem.isAlwaysPlain {
-                        bottomMerged = true
-                    }
-                }
+                let (top, bottom) = self.merged(neighbors: neighbors)
                 
                 async {
-                    let (top, bottom, dateAtBottom) = (topMerged, bottomMerged, self.getDateAtBottom(top: neighbors.previous))
+                    let dateAtBottom = self.getDateAtBottom(top: neighbors.previous)
                     let (layout, apply) = nodeLayout(self, params, top, bottom, dateAtBottom)
                     Queue.mainQueue().async {
                         completion(layout, { _ in
@@ -287,6 +296,18 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
                 }
             }
         }
+    }
+    
+    func merged(neighbors: ListViewItemNeighbors) -> (top: Bool, bottom: Bool) {
+        var top = false
+        if let previousItem = neighbors.previous?.base(ItemListNeighborFacet.self), previousItem.sectionId == self.sectionId && !previousItem.isAlwaysPlain {
+            top = true
+        }
+        var bottom = false
+        if let nextItem = neighbors.next?.base(ItemListNeighborFacet.self), nextItem.sectionId == self.sectionId && !nextItem.isAlwaysPlain {
+            bottom = true
+        }
+        return (top, bottom)
     }
     
     func getDateAtBottom(top: AnyEquatable?) -> Bool {

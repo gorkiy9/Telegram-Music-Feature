@@ -573,8 +573,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
     override public func layoutForParams(_ params: ListViewItemLayoutParams, item: ListViewItem, neighbors: ListViewItemNeighbors) {
         if let item = item as? ListMessageItem {
             let doLayout = self.asyncLayout()
-            let merged = (top: false, bottom: false, dateAtBottom: item.getDateAtBottom(top: neighbors.previous))
-            let (layout, apply) = doLayout(item, params, merged.top, merged.bottom, merged.dateAtBottom)
+            let merged = item.merged(neighbors: neighbors)
+            let (layout, apply) = doLayout(item, params, merged.top, merged.bottom, item.getDateAtBottom(top: neighbors.previous))
             self.contentSize = layout.contentSize
             self.insets = layout.insets
             apply(.None)
@@ -626,7 +626,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
         
         let selectionNodeLayout = ItemListSelectableControlNode.asyncLayout(self.selectionNode)
         
-        return { [weak self] item, params, mergedTop, mergedBottom, dateHeaderAtBottom in
+        return { [weak self] item, listParams, mergedTop, mergedBottom, dateHeaderAtBottom in
+            let params = ListViewItemLayoutParams(width: listParams.width, leftInset: listParams.leftInset + item.additionalSideInset, rightInset: listParams.rightInset + item.additionalSideInset, availableHeight: listParams.availableHeight, isStandalone: listParams.isStandalone)
             var updatedTheme: PresentationTheme?
             
             if currentItem?.presentationData.theme.theme !== item.presentationData.theme.theme {
@@ -704,11 +705,15 @@ public final class ListMessageFileItemNode: ListMessageNode {
                                 isAudio = true
                                 isVoice = voice
                                 
-                                titleText = NSAttributedString(string: title ?? (file.fileName ?? "Unknown Track"), font: audioTitleFont, textColor: item.presentationData.theme.theme.list.itemPrimaryTextColor)
+                                var titleString = title ?? (file.fileName ?? "Unknown Track")
+                                if item.hidesAudioFileExtension {
+                                    titleString = audioTitleWithoutFileExtension(titleString)
+                                }
+                                titleText = NSAttributedString(string: titleString, font: audioTitleFont, textColor: item.presentationData.theme.theme.list.itemPrimaryTextColor)
                                 
                                 var descriptionString: String
-                                if let performer = performer {
-                                    if item.isGlobalSearchResult || item.isDownloadList {
+                                if let performer = performer, item.audioInfo == .default || !performer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    if item.isGlobalSearchResult || item.isDownloadList || item.audioInfo != .default {
                                         descriptionString = performer
                                     } else {
                                         descriptionString = "\(stringForDuration(Int32(duration))) • \(performer)"
@@ -719,7 +724,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                                     descriptionString = ""
                                 }
                                 
-                                if item.isGlobalSearchResult || item.isDownloadList {
+                                if (item.isGlobalSearchResult || item.isDownloadList) && item.audioInfo == .default {
                                     let authorString = stringForFullAuthorName(message: EngineMessage(message), strings: item.presentationData.strings, nameDisplayOrder: item.presentationData.nameDisplayOrder, accountPeerId: item.context.account.peerId)
                                     if authorString.count > 1 {
                                         globalAuthorTitle = authorString.last ?? ""
@@ -825,8 +830,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
                                     descriptionString = "\(dateString)"
                                 }
                             }
-                            
-                            if item.isGlobalSearchResult || item.isDownloadList {
+
+                            if (item.isGlobalSearchResult || item.isDownloadList) && item.audioInfo == .default {
                                 let authorString = stringForFullAuthorName(message: EngineMessage(message), strings: item.presentationData.strings, nameDisplayOrder: item.presentationData.nameDisplayOrder, accountPeerId: item.context.account.peerId)
                                 if authorString.count > 1 {
                                     globalAuthorTitle = authorString.last ?? ""
@@ -886,7 +891,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 descriptionText = NSAttributedString(string: " ", font: descriptionFont, textColor: item.presentationData.theme.theme.list.itemSecondaryTextColor)
             }
             
-            if let _ = item.message?.threadId, item.message?.id.peerId.namespace == Namespaces.Peer.CloudChannel, let threadInfo = item.message?.associatedThreadInfo {
+            if item.audioInfo == .default, let _ = item.message?.threadId, item.message?.id.peerId.namespace == Namespaces.Peer.CloudChannel, let threadInfo = item.message?.associatedThreadInfo {
                 if isInstantVideo || isVoice {
                     titleExtraData = (NSAttributedString(string: threadInfo.title, font: titleFont, textColor: item.presentationData.theme.theme.list.itemPrimaryTextColor), true, threadInfo.icon, threadInfo.iconColor)
                 } else {
@@ -1043,7 +1048,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
             
             let timestamp = Int32(CFAbsoluteTimeGetCurrent() + NSTimeIntervalSince1970)
             let dateText = stringForRelativeTimestamp(strings: item.presentationData.strings, relativeTimestamp: item.message?.timestamp ?? 0, relativeTo: timestamp, dateTimeFormat: item.presentationData.dateTimeFormat)
-            let dateAttributedString = !item.isGlobalSearchResult ? NSAttributedString() : NSAttributedString(string: dateText, font: dateFont, textColor: item.presentationData.theme.theme.list.itemSecondaryTextColor)
+            let dateAttributedString = !item.isGlobalSearchResult || item.audioInfo != .default ? NSAttributedString() : NSAttributedString(string: dateText, font: dateFont, textColor: item.presentationData.theme.theme.list.itemSecondaryTextColor)
             
             let (dateNodeLayout, dateNodeApply) = dateNodeMakeLayout(TextNodeLayoutArguments(attributedString: dateAttributedString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: params.width - leftInset - leftOffset - contentRightInset - 12.0, height: CGFloat.greatestFiniteMagnitude), alignment: .natural, cutout: nil, insets: UIEdgeInsets()))
             
@@ -1104,6 +1109,9 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             var insets = UIEdgeInsets(top: 0.0, left: 0.0, bottom: 0.0, right: 0.0)
+            if !mergedTop {
+                insets.top += item.blockTopInset
+            }
             if dateHeaderAtBottom, let header = item.header {
                 insets.top += header.height
             }
@@ -1160,6 +1168,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     strongSelf.contentSizeValue = nodeLayout.contentSize
                     strongSelf.currentLeftOffset = leftOffset
                     strongSelf.currentRightOffset = rightOffset + reorderInset
+                    strongSelf.updateLayout(size: nodeLayout.contentSize, leftInset: params.leftInset, rightInset: params.rightInset)
+                    strongSelf.setRevealOptions((left: item.leftRevealOptions.map(\.option), right: item.rightRevealOptions.map(\.option)))
                     
                     if let _ = updatedTheme {
                         if item.displayBackground || item.canReorder {
@@ -1238,10 +1248,27 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     }
                     
                     transition.updateFrame(node: strongSelf.separatorNode, frame: CGRect(origin: CGPoint(x: leftInset + leftOffset, y: nodeLayout.contentSize.height - UIScreenPixel), size: CGSize(width: params.width - leftInset - leftOffset - separatorRightInset - params.rightInset - rightOffset, height: UIScreenPixel)))
-                    strongSelf.highlightedBackgroundNode.frame = CGRect(origin: CGPoint(x: 0.0, y: -nodeLayout.insets.top - UIScreenPixel), size: CGSize(width: params.width, height: nodeLayout.size.height + UIScreenPixel - nodeLayout.insets.bottom))
+                    let highlightedBackgroundFrame: CGRect
+                    if item.additionalSideInset > 0.0 {
+                        highlightedBackgroundFrame = CGRect(origin: CGPoint(x: item.additionalSideInset, y: 0.0), size: CGSize(width: params.width - item.additionalSideInset * 2.0, height: nodeLayout.contentSize.height))
+                    } else {
+                        highlightedBackgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: -nodeLayout.insets.top - UIScreenPixel), size: CGSize(width: params.width, height: nodeLayout.size.height + UIScreenPixel - nodeLayout.insets.bottom))
+                    }
+                    if strongSelf.hasRevealOptions {
+                        // The highlight is the surface a swiped row slides on.
+                        strongSelf.updateRevealOptionsHighlightedBackgroundFrame(strongSelf.highlightedBackgroundNode, frame: highlightedBackgroundFrame, aboveNodes: [strongSelf.backgroundNode])
+                    } else {
+                        strongSelf.highlightedBackgroundNode.frame = highlightedBackgroundFrame
+                    }
                     
+                    let backgroundFrame: CGRect
+                    if item.blockTopInset > 0.0 {
+                        backgroundFrame = CGRect(origin: CGPoint(), size: CGSize(width: params.width, height: nodeLayout.contentSize.height))
+                    } else {
+                        backgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: -nodeLayout.insets.top), size: CGSize(width: params.width, height: nodeLayout.size.height - nodeLayout.insets.bottom))
+                    }
                     if let backgroundNode = strongSelf.backgroundNode {
-                        backgroundNode.frame = CGRect(origin: CGPoint(x: 0.0, y: -nodeLayout.insets.top), size: CGSize(width: params.width, height: nodeLayout.size.height - nodeLayout.insets.bottom))
+                        backgroundNode.frame = backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0)
                     }
                     
                     switch item.style {
@@ -1274,9 +1301,13 @@ public final class ListMessageFileItemNode: ListMessageNode {
                         }
 
                         strongSelf.maskNode.image = hasCorners ? PresentationResourcesItemList.cornersImage(item.presentationData.theme.theme, top: hasTopCorners, bottom: hasBottomCorners, glass: item.systemStyle == .glass) : nil
-                        if let backgroundNode = strongSelf.backgroundNode {
-                            strongSelf.maskNode.frame = backgroundNode.frame.insetBy(dx: params.leftInset, dy: -UIScreenPixel)
+                        if strongSelf.backgroundNode != nil {
+                            strongSelf.maskNode.frame = backgroundFrame.insetBy(dx: params.leftInset, dy: -UIScreenPixel)
                         }
+                    }
+                    
+                    if strongSelf.hasRevealOptions {
+                        strongSelf.updateRevealOptionsSeparatorNodes(top: nil, bottom: strongSelf.separatorNode, topIsHidden: true, bottomIsHidden: strongSelf.separatorNode.isHidden)
                     }
                     
                     transition.updateFrame(node: strongSelf.titleNode, frame: CGRect(origin: CGPoint(x: leftOffset + leftInset - 1.0, y: 7.0 + verticalInset), size: titleNodeLayout))
@@ -1496,8 +1527,36 @@ public final class ListMessageFileItemNode: ListMessageNode {
         self.iconStatusNode.transitionToState(iconStatusState)
     }
     
+    private var hasRevealOptions: Bool {
+        guard let item = self.appliedItem else {
+            return false
+        }
+        return !item.leftRevealOptions.isEmpty || !item.rightRevealOptions.isEmpty
+    }
+    
+    override public func updateRevealOffset(offset: CGFloat, transition: ContainedViewLayoutTransition) {
+        super.updateRevealOffset(offset: offset, transition: transition)
+        
+        var containerBounds = self.containerNode.bounds
+        containerBounds.origin.x = -offset
+        transition.updateBounds(node: self.containerNode, bounds: containerBounds)
+    }
+    
+    override public func revealOptionSelected(_ option: ItemListRevealOption, animated: Bool) {
+        if let item = self.appliedItem, let revealOption = (item.leftRevealOptions + item.rightRevealOptions).first(where: { $0.option.key == option.key }) {
+            revealOption.action()
+        }
+        self.setRevealOptionsOpened(false, animated: true)
+        self.revealOptionsInteractivelyClosed()
+    }
+    
     override public func setHighlighted(_ highlighted: Bool, at point: CGPoint, animated: Bool) {
         super.setHighlighted(highlighted, at: point, animated: animated)
+        
+        if self.hasRevealOptions {
+            // The reveal surface owns the highlight.
+            return
+        }
         
         if highlighted, let item = self.item, case .none = item.selection {
             self.highlightedBackgroundNode.alpha = 1.0
@@ -1750,7 +1809,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
     }
     
     public override var canBeSelected: Bool {
-        return !self.currentIsRestricted
+        return !self.currentIsRestricted && super.canBeSelected
     }
 }
 

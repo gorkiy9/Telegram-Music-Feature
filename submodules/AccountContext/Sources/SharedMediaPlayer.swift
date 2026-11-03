@@ -59,6 +59,17 @@ public struct SharedMediaPlaybackAlbumArt: Equatable {
     }
 }
 
+private let audioFileExtensions: Set<String> = ["aac", "aif", "aiff", "alac", "flac", "m4a", "m4b", "mp3", "oga", "ogg", "opus", "wav", "wma"]
+
+/// A track without a title tag is named after its file, and some tags repeat the file name. Other extensions stay: they may be part of the name.
+public func audioTitleWithoutFileExtension(_ title: String) -> String {
+    guard let range = title.range(of: ".", options: .backwards), audioFileExtensions.contains(title[range.upperBound...].lowercased()) else {
+        return title
+    }
+    let name = title[..<range.lowerBound]
+    return name.isEmpty ? title : String(name)
+}
+
 public enum SharedMediaPlaybackDisplayData: Equatable {
     case music(title: String?, performer: String?, albumArt: SharedMediaPlaybackAlbumArt?, long: Bool, caption: NSAttributedString?)
     case voice(author: EnginePeer?, peer: EnginePeer?)

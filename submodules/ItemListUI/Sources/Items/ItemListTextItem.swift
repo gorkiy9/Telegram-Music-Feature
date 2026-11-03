@@ -202,7 +202,7 @@ public class ItemListTextItemNode: ListViewItemNode, ItemListItemNode {
             case let .custom(_, string):
                 attributedText = string
             }
-            let (titleLayout, titleApply) = makeTitleLayout(TextNodeLayoutArguments(attributedString: attributedText, backgroundColor: nil, maximumNumberOfLines: 0, truncationType: .end, constrainedSize: CGSize(width: params.width - leftInset * 2.0 - params.leftInset - params.rightInset, height: CGFloat.greatestFiniteMagnitude), alignment: item.textAlignment.textAlignment, cutout: nil, insets: UIEdgeInsets()))
+            let (titleLayout, titleApply) = makeTitleLayout(TextNodeLayoutArguments(attributedString: attributedText, backgroundColor: nil, maximumNumberOfLines: 0, truncationType: .end, constrainedSize: CGSize(width: params.width - leftInset * 2.0 - params.leftInset - params.rightInset - item.additionalInsets.left - item.additionalInsets.right, height: CGFloat.greatestFiniteMagnitude), alignment: item.textAlignment.textAlignment, cutout: nil, insets: UIEdgeInsets()))
             
             let contentSize: CGSize
             
@@ -240,9 +240,9 @@ public class ItemListTextItemNode: ListViewItemNode, ItemListItemNode {
                     let titleOrigin: CGFloat
                     switch item.textAlignment {
                     case .natural:
-                        titleOrigin = leftInset + params.leftInset
+                        titleOrigin = leftInset + params.leftInset + item.additionalInsets.left
                     case .center:
-                        titleOrigin = params.leftInset + floorToScreenPixels((contentSize.width - params.leftInset - params.rightInset - titleLayout.size.width) / 2.0)
+                        titleOrigin = params.leftInset + item.additionalInsets.left + floorToScreenPixels((contentSize.width - params.leftInset - params.rightInset - item.additionalInsets.left - item.additionalInsets.right - titleLayout.size.width) / 2.0)
                     }
 
                     strongSelf.textNode.textNode.frame = CGRect(origin: CGPoint(x: titleOrigin, y: topInset), size: titleLayout.size)

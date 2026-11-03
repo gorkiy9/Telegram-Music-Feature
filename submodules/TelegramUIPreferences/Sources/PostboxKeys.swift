@@ -106,6 +106,7 @@ private enum ApplicationSpecificItemCacheCollectionIdValues: Int8 {
     case shareWithPeersState = 13
     case webAppPermissionsState = 14
     case richTextArticleDrafts = 15
+    case music = 16
 }
 
 public struct ApplicationSpecificItemCacheCollectionId {
@@ -122,6 +123,7 @@ public struct ApplicationSpecificItemCacheCollectionId {
     public static let shareWithPeersState = applicationSpecificItemCacheCollectionId(ApplicationSpecificItemCacheCollectionIdValues.shareWithPeersState.rawValue)
     public static let webAppPermissionsState = applicationSpecificItemCacheCollectionId(ApplicationSpecificItemCacheCollectionIdValues.webAppPermissionsState.rawValue)
     public static let richTextArticleDrafts = applicationSpecificItemCacheCollectionId(ApplicationSpecificItemCacheCollectionIdValues.richTextArticleDrafts.rawValue)
+    public static let music = applicationSpecificItemCacheCollectionId(ApplicationSpecificItemCacheCollectionIdValues.music.rawValue)
 }
 
 private enum ApplicationSpecificOrderedItemListCollectionIdValues: Int32 {

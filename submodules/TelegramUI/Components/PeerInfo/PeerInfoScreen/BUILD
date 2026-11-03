@@ -33,6 +33,7 @@ swift_library(
         "//submodules/TelegramUI/Components/ChatControllerInteraction",
         "//submodules/ChatInterfaceState",
         "//submodules/TelegramUI/Components/ChatListHeaderComponent",
+        "//submodules/TelegramUI/Components/Music/MusicScreen",
         "//submodules/ChatListUI",
         "//submodules/TelegramUI/Components/Chat/ChatMessageItemView",
         "//submodules/ChatPresentationInterfaceState",

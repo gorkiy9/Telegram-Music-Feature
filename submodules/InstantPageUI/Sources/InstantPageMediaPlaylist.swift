@@ -114,7 +114,7 @@ final class InstantPageMediaPlaylistItem: SharedMediaPlaylistItem {
                                 albumArt = SharedMediaPlaybackAlbumArt(thumbnailResource: ExternalMusicAlbumArtResource(file: .standalone(media: file), title: updatedTitle ?? "", performer: updatedPerformer ?? "", isThumbnail: true), fullSizeResource: ExternalMusicAlbumArtResource(file: .standalone(media: file), title: updatedTitle ?? "", performer: updatedPerformer ?? "", isThumbnail: false))
                             }
                             
-                            return SharedMediaPlaybackDisplayData.music(title: updatedTitle, performer: updatedPerformer, albumArt: albumArt, long: CGFloat(duration) > 10.0 * 60.0, caption: nil)
+                            return SharedMediaPlaybackDisplayData.music(title: updatedTitle.flatMap(audioTitleWithoutFileExtension), performer: updatedPerformer, albumArt: albumArt, long: CGFloat(duration) > 10.0 * 60.0, caption: nil)
                         }
                     case let .Video(_, _, flags, _, _, _):
                         if flags.contains(.instantRoundVideo) {
@@ -127,7 +127,7 @@ final class InstantPageMediaPlaylistItem: SharedMediaPlaylistItem {
                 }
             }
             
-            return SharedMediaPlaybackDisplayData.music(title: file.fileName ?? "", performer: "", albumArt: nil, long: false, caption: nil)
+            return SharedMediaPlaybackDisplayData.music(title: audioTitleWithoutFileExtension(file.fileName ?? ""), performer: "", albumArt: nil, long: false, caption: nil)
         }
         return nil
     }

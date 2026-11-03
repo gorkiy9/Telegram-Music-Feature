@@ -1,0 +1,46 @@
+load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
+
+swift_library(
+    name = "MusicScreen",
+    module_name = "MusicScreen",
+    srcs = glob([
+        "Sources/**/*.swift",
+    ]),
+    copts = [
+        "-warnings-as-errors",
+    ],
+    deps = [
+        "//submodules/AsyncDisplayKit",
+        "//submodules/Display",
+        "//submodules/SSignalKit/SwiftSignalKit",
+        "//submodules/ComponentFlow",
+        "//submodules/AccountContext",
+        "//submodules/TelegramCore",
+        "//submodules/TelegramPresentationData",
+        "//submodules/TelegramUIPreferences",
+        "//submodules/MergeLists",
+        "//submodules/ListMessageItem",
+        "//submodules/ItemListUI",
+        "//submodules/ContactsPeerItem",
+        "//submodules/ChatListSearchItemHeader",
+        "//submodules/ContextUI",
+        "//submodules/ICloudResources",
+        "//submodules/LegacyMediaPickerUI",
+        "//submodules/UndoUI",
+        "//submodules/PromptUI",
+        "//submodules/TelegramUI/Components/ChatListHeaderComponent",
+        "//submodules/TelegramUI/Components/NavigationBarComponent",
+        "//submodules/TelegramUI/Components/HeaderPanelContainerComponent",
+        "//submodules/TelegramUI/Components/MediaPlaybackHeaderPanelComponent",
+        "//submodules/TelegramUI/Components/GlobalControlPanelsContext",
+        "//submodules/TelegramUI/Components/MediaManager/PeerMessagesMediaPlaylist",
+        "//submodules/TelegramUI/Components/GlassControls",
+        "//submodules/TelegramUI/Components/PlainButtonComponent",
+        "//submodules/Components/BundleIconComponent",
+        "//submodules/Components/MultilineTextComponent",
+        "//submodules/PresentationDataUtils",
+    ],
+    visibility = [
+        "//visibility:public",
+    ],
+)

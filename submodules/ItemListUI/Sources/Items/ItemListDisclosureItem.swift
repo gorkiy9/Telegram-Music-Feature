@@ -69,6 +69,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
     let style: ItemListStyle
     let disclosureStyle: ItemListDisclosureStyle
     let noInsets: Bool
+    let additionalSideInset: CGFloat
     let action: (() -> Void)?
     let clearHighlightAutomatically: Bool
     public let tag: ItemListItemTag?
@@ -96,6 +97,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         style: ItemListStyle,
         disclosureStyle: ItemListDisclosureStyle = .arrow,
         noInsets: Bool = false,
+        additionalSideInset: CGFloat = 0.0,
         action: (() -> Void)?,
         clearHighlightAutomatically: Bool = true,
         tag: ItemListItemTag? = nil,
@@ -122,6 +124,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         self.style = style
         self.disclosureStyle = disclosureStyle
         self.noInsets = noInsets
+        self.additionalSideInset = additionalSideInset
         self.action = action
         self.clearHighlightAutomatically = clearHighlightAutomatically
         self.tag = tag
@@ -339,7 +342,8 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
         
         let currentHasBadge = self.labelBadgeNode.image != nil
         
-        return { [weak self] item, params, neighbors in
+        return { [weak self] item, listParams, neighbors in
+            let params = ListViewItemLayoutParams(width: listParams.width, leftInset: listParams.leftInset + item.additionalSideInset, rightInset: listParams.rightInset + item.additionalSideInset, availableHeight: listParams.availableHeight, isStandalone: listParams.isStandalone)
             var rightInset: CGFloat
             switch item.disclosureStyle {
             case .none:
@@ -715,9 +719,10 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
                         
                         strongSelf.maskNode.image = hasCorners ? PresentationResourcesItemList.cornersImage(item.presentationData.theme, top: hasTopCorners, bottom: hasBottomCorners, glass: item.systemStyle == .glass) : nil
                         
-                        strongSelf.backgroundNode.frame = CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight)))
-                        strongSelf.highlightNode.frame = CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight)))
-                        strongSelf.maskNode.frame = strongSelf.backgroundNode.frame.inset(by: UIEdgeInsets(top: 0.0, left: params.leftInset, bottom: 0.0, right: params.rightInset))
+                        let backgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: contentSize.height + min(insets.top, separatorHeight) + min(insets.bottom, separatorHeight)))
+                        strongSelf.backgroundNode.frame = backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0)
+                        strongSelf.highlightNode.frame = backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0)
+                        strongSelf.maskNode.frame = backgroundFrame.inset(by: UIEdgeInsets(top: 0.0, left: params.leftInset, bottom: 0.0, right: params.rightInset))
                         strongSelf.topStripeNode.frame = CGRect(origin: CGPoint(x: 0.0, y: -min(insets.top, separatorHeight)), size: CGSize(width: params.width, height: separatorHeight))
                         strongSelf.bottomStripeNode.frame = CGRect(origin: CGPoint(x: bottomStripeInset, y: contentSize.height - separatorHeight), size: CGSize(width: params.width - params.rightInset - bottomStripeInset - separatorRightInset, height: separatorHeight))
                     }

@@ -13,12 +13,14 @@ import DeviceAccess
 import TelegramStringFormatting
 import PeerNameColorItem
 import WalletContext
+import MusicScreen
 
 enum SettingsSection: Int, CaseIterable {
     case edit
     case phone
     case accounts
     case myProfile
+    case music
     case wallet
     case proxy
     case apps
@@ -152,6 +154,12 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
         items[.myProfile]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_MyProfile, icon: PresentationResourcesSettings.myProfile, action: {
             interaction.openSettings(.profile)
         }))
+        
+        if isMusicSectionEnabled {
+            items[.music]!.append(PeerInfoScreenDisclosureItem(id: 0, text: musicSectionTitle(strings: presentationData.strings), icon: PresentationResourcesSettings.musicSection, action: {
+                interaction.openSettings(.music)
+            }))
+        }
         
         if WalletConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 }).isAvailable {
             let balanceText: NSAttributedString

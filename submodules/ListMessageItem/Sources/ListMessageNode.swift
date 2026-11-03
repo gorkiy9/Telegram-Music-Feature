@@ -4,13 +4,14 @@ import Display
 import AsyncDisplayKit
 import TelegramCore
 import AccountContext
+import ItemListUI
 
-public class ListMessageNode: ListViewItemNode {
+public class ListMessageNode: ItemListRevealOptionsItemNode {
     var item: ListMessageItem?
     var interaction: ListMessageItemInteraction?
     
     required init() {
-        super.init(layerBacked: false)
+        super.init(layerBacked: false, rotated: false, seeThrough: false)
     }
     
     func setupItem(_ item: ListMessageItem) {

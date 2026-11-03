@@ -219,6 +219,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
     let itemHighlighting: ContactItemHighlighting?
     let contextAction: ((ASDisplayNode, ContextGesture?, CGPoint?) -> Void)?
     let arrowAction: (() -> Void)?
+    let arrowIsDisclosure: Bool
     let animationCache: AnimationCache?
     let animationRenderer: MultiAnimationRenderer?
     let storyStats: (total: Int, unseen: Int, hasUnseenCloseFriends: Bool, hasLiveItems: Bool)?
@@ -279,6 +280,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         deletePeer: ((EnginePeer.Id) -> Void)? = nil,
         itemHighlighting: ContactItemHighlighting? = nil,
         contextAction: ((ASDisplayNode, ContextGesture?, CGPoint?) -> Void)? = nil, arrowAction: (() -> Void)? = nil,
+        arrowIsDisclosure: Bool = false,
         animationCache: AnimationCache? = nil,
         animationRenderer: MultiAnimationRenderer? = nil,
         storyStats: (total: Int, unseen: Int, hasUnseenCloseFriends: Bool, hasLiveItems: Bool)? = nil,
@@ -321,6 +323,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         self.selectable = (enabled && action != nil) || disabledAction != nil
         self.contextAction = contextAction
         self.arrowAction = arrowAction
+        self.arrowIsDisclosure = arrowIsDisclosure
         self.animationCache = animationCache
         self.animationRenderer = animationRenderer
         self.storyStats = storyStats
@@ -899,7 +902,11 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
             
             var arrowButtonImage: UIImage?
             if let _ = item.arrowAction {
-                arrowButtonImage = generateTintedImage(image: UIImage(bundleImageName: "Chat List/Search/Arrow"), color: item.presentationData.theme.list.disclosureArrowColor)
+                if item.arrowIsDisclosure {
+                    arrowButtonImage = PresentationResourcesItemList.disclosureArrowImage(item.presentationData.theme)
+                } else {
+                    arrowButtonImage = generateTintedImage(image: UIImage(bundleImageName: "Chat List/Search/Arrow"), color: item.presentationData.theme.list.disclosureArrowColor)
+                }
             }
             
             var actionButtons: [ActionButton]?

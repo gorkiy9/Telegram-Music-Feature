@@ -131,6 +131,11 @@ public struct PresentationResourcesSettings {
     public static let powerSaving = renderSettingsIcon(name: "Item List/Icons/PowerSaving", backgroundColors: [colorOrange])
     public static let business = renderSettingsIcon(name: "Item List/Icons/Business", backgroundColors: [UIColor(rgb: 0xA95CE3), UIColor(rgb: 0xF16B80)])
     public static let myProfile = renderSettingsIcon(name: "Item List/Icons/Profile", backgroundColors: [colorRed])
+    public static let musicSection = renderSettingsIcon(name: "Item List/Icons/Play", backgroundColors: [colorPurple])
+    public static let musicSongs = renderSettingsIcon(name: "Media Editor/Audio", backgroundColors: [colorPurple])
+    public static let musicArtists = renderSettingsIcon(name: "Item List/Icons/Microphone", backgroundColors: [colorBlue])
+    public static let musicPlaylists = renderSettingsIcon(name: "Music/PlaylistsTile", backgroundColors: [colorOrange])
+    public static let musicFavorites = renderSettingsIcon(name: "Call/StarHighlighted", scaleFactor: 0.7, backgroundColors: [colorRed])
     
     public static let birthday = renderSettingsIcon(name: "Item List/Icons/Cake", backgroundColors: [colorBlue])
     public static let aiTools = renderSettingsIcon(name: "Item List/Icons/AITools", backgroundColors: [colorPurple])

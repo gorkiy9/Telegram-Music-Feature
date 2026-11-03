@@ -27,6 +27,7 @@ import ImageCompression
 import TextFormat
 import MediaEditor
 import PeerInfoScreen
+import MusicScreen
 import PeerInfoStoryGridScreen
 import ShareWithPeersScreen
 import ChatEmptyNode
@@ -79,6 +80,11 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
     public var contactsController: ContactsController?
     public var callListController: CallListController?
     public var chatListController: ChatListController?
+    public var musicController: MusicScreen?
+    private var showMusicTab = true
+    private var showCallsTab = false
+    private var showNewsTab = false
+    private var showMusicTabDisposable: Disposable?
     public var accountSettingsController: PeerInfoScreen?
     public var newsController: NewsScreen?
     
@@ -148,6 +154,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         self.presentationDataDisposable?.dispose()
         self.applicationInFocusDisposable?.dispose()
         self.storyUploadEventsDisposable?.dispose()
+        self.showMusicTabDisposable?.dispose()
     }
     
     public func getContactsController() -> ViewController? {
@@ -199,6 +206,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
     public func addRootControllers(showCallsTab: Bool, showNewsTab: Bool) {
         let tabBarController = TabBarControllerImpl(theme: self.presentationData.theme, strings: self.presentationData.strings)
         tabBarController.navigationPresentation = .master
+        tabBarController.currentControllerUpdated = { previous, current in
+            (current as? MusicScreen)?.sectionOpened(from: previous)
+        }
         let chatListController = self.context.sharedContext.makeChatListController(context: self.context, location: .chatList(groupId: .root), controlsHistoryPreload: true, hideNetworkActivityStatus: false, previewing: false, enableDebugActions: !GlobalExperimentalSettings.isAppStoreBuild)
         if let sharedContext = self.context.sharedContext as? SharedAccountContextImpl {
             chatListController.tabBarItem.badgeValue = sharedContext.switchingData.chatListBadge
@@ -206,6 +216,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         let callListController = CallListController(context: self.context, mode: .tab)
         // Created even when hidden, like the calls tab: `updateRootControllers` shows and hides it.
         let newsController = NewsScreen(context: self.context)
+        let musicController = isMusicSectionEnabled ? MusicScreen(context: self.context, mode: .tab) : nil
+        self.showCallsTab = showCallsTab
+        self.showNewsTab = showNewsTab
         
         var controllers: [ViewController] = []
         
@@ -221,6 +234,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         controllers.append(chatListController)
         if showNewsTab {
             controllers.append(newsController)
+        }
+        if let musicController, self.showMusicTab {
+            controllers.append(musicController)
         }
         
         var restoreSettignsController: (ViewController & SettingsController)?
@@ -248,6 +264,18 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         self.contactsController = contactsController
         self.callListController = callListController
         self.newsController = newsController
+        self.musicController = musicController
+        if musicController != nil {
+            // Turned off from Music in Settings; the controller stays, like the hidden calls tab.
+            self.showMusicTabDisposable = (musicTabIsShown(context: self.context)
+            |> deliverOnMainQueue).start(next: { [weak self] value in
+                guard let self, self.showMusicTab != value else {
+                    return
+                }
+                self.showMusicTab = value
+                self.updateRootControllers(showCallsTab: self.showCallsTab, showNewsTab: self.showNewsTab)
+            })
+        }
         self.chatListController = chatListController
         self.accountSettingsController = accountSettingsController
         self.rootTabController = tabBarController
@@ -258,6 +286,8 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         guard let rootTabController = self.rootTabController as? TabBarControllerImpl else {
             return
         }
+        self.showCallsTab = showCallsTab
+        self.showNewsTab = showNewsTab
         var controllers: [ViewController] = []
         controllers.append(self.contactsController!)
         if showCallsTab {
@@ -266,6 +296,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         controllers.append(self.chatListController!)
         if showNewsTab, let newsController = self.newsController {
             controllers.append(newsController)
+        }
+        if let musicController = self.musicController, self.showMusicTab {
+            controllers.append(musicController)
         }
         controllers.append(self.accountSettingsController!)
 

@@ -169,6 +169,7 @@ submodules/TelegramUI/Components/MediaManager/PeerMessagesMediaPlaylist/Sources/
 submodules/TelegramUI/Components/MessageInputPanelComponent/Sources/InputContextQueries.swift
 submodules/TelegramUI/Components/MessageInputPanelComponent/Sources/MediaPreviewPanelComponent.swift
 submodules/TelegramUI/Components/MultiplexedVideoNode/Sources/SoftwareVideoThumbnailLayer.swift
+submodules/TelegramUI/Components/Music/MusicScreen/Sources/MusicLibrary.swift
 submodules/TelegramUI/Components/PeerInfo/PeerInfoCoverComponent/Sources/PeerInfoCoverComponent.swift
 submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/Panes/PeerInfoGifPaneNode.swift
 submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoAvatarTransformContainerNode.swift
