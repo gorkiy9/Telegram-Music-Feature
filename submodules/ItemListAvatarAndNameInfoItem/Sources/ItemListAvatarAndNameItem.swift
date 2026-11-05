@@ -164,11 +164,14 @@ public class ItemListAvatarAndNameInfoItem: ListViewItem, ItemListItem, ListItem
     let action: (() -> Void)?
     let longTapAction: (() -> Void)?
     public let tag: ItemListItemTag?
+    /// Overrides the group or channel name placeholder of a title.
+    let namePlaceholder: String?
     
     public let selectable: Bool
 
-    public init(itemContext: ItemContext, presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, dateTimeFormat: PresentationDateTimeFormat, mode: ItemListAvatarAndNameInfoItemMode, peer: EnginePeer?, presence: EnginePeer.Presence?, label: String? = nil, memberCount: Int?, state: ItemListAvatarAndNameInfoItemState, sectionId: ItemListSectionId, style: ItemListAvatarAndNameInfoItemStyle, editingNameUpdated: @escaping (ItemListAvatarAndNameInfoItemName) -> Void, editingNameCompleted: @escaping () -> Void = {}, avatarTapped: @escaping () -> Void, context: ItemListAvatarAndNameInfoItemContext? = nil, updatingImage: ItemListAvatarAndNameInfoItemUpdatingAvatar? = nil, call: (() -> Void)? = nil, action: (() -> Void)? = nil, longTapAction: (() -> Void)? = nil, tag: ItemListItemTag? = nil) {
+    public init(itemContext: ItemContext, presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, dateTimeFormat: PresentationDateTimeFormat, mode: ItemListAvatarAndNameInfoItemMode, peer: EnginePeer?, presence: EnginePeer.Presence?, label: String? = nil, memberCount: Int?, state: ItemListAvatarAndNameInfoItemState, sectionId: ItemListSectionId, style: ItemListAvatarAndNameInfoItemStyle, editingNameUpdated: @escaping (ItemListAvatarAndNameInfoItemName) -> Void, editingNameCompleted: @escaping () -> Void = {}, avatarTapped: @escaping () -> Void, context: ItemListAvatarAndNameInfoItemContext? = nil, updatingImage: ItemListAvatarAndNameInfoItemUpdatingAvatar? = nil, call: (() -> Void)? = nil, action: (() -> Void)? = nil, longTapAction: (() -> Void)? = nil, tag: ItemListItemTag? = nil, namePlaceholder: String? = nil) {
         self.itemContext = itemContext
+        self.namePlaceholder = namePlaceholder
         self.presentationData = presentationData
         self.systemStyle = systemStyle
         self.dateTimeFormat = dateTimeFormat
@@ -915,12 +918,15 @@ public class ItemListAvatarAndNameInfoItemNode: ListViewItemNode, ItemListItemNo
                                     strongSelf.inputFirstField?.text = title
                                 }
                                 strongSelf.inputFirstField?.textColor = item.presentationData.theme.list.itemPrimaryTextColor
-                                let placeholder: String
+                                var placeholder: String
                                 switch type {
                                     case .group:
                                         placeholder = item.presentationData.strings.GroupInfo_GroupNamePlaceholder
                                     case .channel:
                                         placeholder = item.presentationData.strings.GroupInfo_ChannelListNamePlaceholder
+                                }
+                                if let namePlaceholder = item.namePlaceholder {
+                                    placeholder = namePlaceholder
                                 }
                                 strongSelf.inputFirstField?.attributedPlaceholder = NSAttributedString(string: placeholder, font: Font.regular(floor(item.presentationData.fontSize.itemListBaseFontSize * 19.0 / 17.0)), textColor: item.presentationData.theme.list.itemPlaceholderTextColor)
                                 if strongSelf.inputFirstField?.keyboardAppearance != keyboardAppearance {

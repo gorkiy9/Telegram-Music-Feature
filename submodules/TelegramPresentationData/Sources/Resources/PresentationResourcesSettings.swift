@@ -136,6 +136,11 @@ public struct PresentationResourcesSettings {
     public static let musicArtists = renderSettingsIcon(name: "Item List/Icons/Microphone", backgroundColors: [colorBlue])
     public static let musicPlaylists = renderSettingsIcon(name: "Music/PlaylistsTile", backgroundColors: [colorOrange])
     public static let musicFavorites = renderSettingsIcon(name: "Call/StarHighlighted", scaleFactor: 0.7, backgroundColors: [colorRed])
+    // Tile backgrounds for the hub rows whose glyph is an animation drawn on top.
+    public static let musicSongsTile = renderSettingsIcon(name: "", backgroundColors: [colorPurple])
+    public static let musicArtistsTile = renderSettingsIcon(name: "", backgroundColors: [colorBlue])
+    public static let musicPlaylistsTile = renderSettingsIcon(name: "", backgroundColors: [colorOrange])
+    public static let musicFavoritesTile = renderSettingsIcon(name: "", backgroundColors: [colorRed])
     
     public static let birthday = renderSettingsIcon(name: "Item List/Icons/Cake", backgroundColors: [colorBlue])
     public static let aiTools = renderSettingsIcon(name: "Item List/Icons/AITools", backgroundColors: [colorPurple])

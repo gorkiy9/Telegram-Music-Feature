@@ -10,6 +10,8 @@ import TelegramCore
 import AccountContext
 import TextNodeWithEntities
 import ListItemComponentAdaptor
+import ManagedAnimationNode
+import LottieSettings
 
 private let avatarFont = avatarPlaceholderFont(size: 16.0)
 
@@ -41,6 +43,22 @@ public enum ItemListDisclosureLabelStyle {
     case image(image: UIImage, size: CGSize)
 }
 
+/// A Lottie glyph drawn over `icon`, which then holds only the tile background.
+/// The glyph rests on its last frame and plays again whenever `playToken` changes.
+public struct ItemListDisclosureItemIconAnimation: Equatable {
+    public let name: String
+    public let size: CGSize
+    public let offset: CGPoint
+    public let playToken: Int
+
+    public init(name: String, size: CGSize, offset: CGPoint = CGPoint(), playToken: Int) {
+        self.name = name
+        self.size = size
+        self.offset = offset
+        self.playToken = playToken
+    }
+}
+
 public enum ItemListDisclosureItemDetailLabelColor {
     case generic
     case constructive
@@ -51,6 +69,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
     let presentationData: ItemListPresentationData
     let systemStyle: ItemListSystemStyle
     let icon: UIImage?
+    let iconAnimation: ItemListDisclosureItemIconAnimation?
     let context: AccountContext?
     let iconPeer: EnginePeer?
     let title: String
@@ -70,6 +89,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
     let disclosureStyle: ItemListDisclosureStyle
     let noInsets: Bool
     let additionalSideInset: CGFloat
+    let blockTopInset: CGFloat?
     let action: (() -> Void)?
     let clearHighlightAutomatically: Bool
     public let tag: ItemListItemTag?
@@ -79,6 +99,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         presentationData: ItemListPresentationData,
         systemStyle: ItemListSystemStyle = .legacy,
         icon: UIImage? = nil,
+        iconAnimation: ItemListDisclosureItemIconAnimation? = nil,
         context: AccountContext? = nil,
         iconPeer: EnginePeer? = nil,
         title: String,
@@ -98,6 +119,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         disclosureStyle: ItemListDisclosureStyle = .arrow,
         noInsets: Bool = false,
         additionalSideInset: CGFloat = 0.0,
+        blockTopInset: CGFloat? = nil,
         action: (() -> Void)?,
         clearHighlightAutomatically: Bool = true,
         tag: ItemListItemTag? = nil,
@@ -106,6 +128,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         self.presentationData = presentationData
         self.systemStyle = systemStyle
         self.icon = icon
+        self.iconAnimation = iconAnimation
         self.context = context
         self.iconPeer = iconPeer
         self.title = title
@@ -125,6 +148,7 @@ public class ItemListDisclosureItem: ListViewItem, ItemListItem, ListItemCompone
         self.disclosureStyle = disclosureStyle
         self.noInsets = noInsets
         self.additionalSideInset = additionalSideInset
+        self.blockTopInset = blockTopInset
         self.action = action
         self.clearHighlightAutomatically = clearHighlightAutomatically
         self.tag = tag
@@ -210,6 +234,9 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
     
     var avatarNode: AvatarNode?
     let iconNode: ASImageNode
+    private var iconAnimationNode: SimpleAnimationNode?
+    private var iconAnimationName: String?
+    private var iconAnimationPlayToken: Int?
     let titleNode: TextNodeWithEntities
     let titleIconNode: ASImageNode
     public let labelNode: TextNode
@@ -330,6 +357,36 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
         })
     }
     
+    private func updateIconAnimation(_ iconAnimation: ItemListDisclosureItemIconAnimation?) {
+        guard let iconAnimation else {
+            self.iconAnimationNode?.removeFromSupernode()
+            self.iconAnimationNode = nil
+            self.iconAnimationName = nil
+            self.iconAnimationPlayToken = nil
+            return
+        }
+        let animationNode: SimpleAnimationNode
+        if let current = self.iconAnimationNode, self.iconAnimationName == iconAnimation.name, current.size == iconAnimation.size {
+            animationNode = current
+            if self.iconAnimationPlayToken != iconAnimation.playToken {
+                animationNode.reset(immediately: true)
+                animationNode.play()
+            }
+        } else {
+            self.iconAnimationNode?.removeFromSupernode()
+            animationNode = SimpleAnimationNode(animationName: iconAnimation.name, size: iconAnimation.size, lottieSettings: .noAccountFallback)
+            animationNode.isUserInteractionEnabled = false
+            // A row that appears later shows the finished glyph rather than replaying it.
+            animationNode.seekToEnd(immediately: true)
+            self.iconAnimationNode = animationNode
+            self.addSubnode(animationNode)
+        }
+        self.iconAnimationName = iconAnimation.name
+        self.iconAnimationPlayToken = iconAnimation.playToken
+        let iconFrame = self.iconNode.frame
+        animationNode.frame = CGRect(origin: CGPoint(x: iconFrame.midX - iconAnimation.size.width / 2.0 + iconAnimation.offset.x, y: iconFrame.midY - iconAnimation.size.height / 2.0 + iconAnimation.offset.y), size: iconAnimation.size)
+    }
+
     public func asyncLayout() -> (_ item: ItemListDisclosureItem, _ params: ListViewItemLayoutParams, _ insets: ItemListNeighbors) -> (ListViewItemNodeLayout, () -> Void) {
         let makeTitleLayout = TextNode.asyncLayout(self.titleNode.textNode)
         let makeTitleWithEntitiesLayout = TextNodeWithEntities.asyncLayout(self.titleNode)
@@ -578,6 +635,10 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
                 itemSeparatorColor = item.presentationData.theme.list.itemBlocksSeparatorColor
                 contentSize = CGSize(width: params.width, height: height)
                 insets = itemListNeighborsGroupedInsets(neighbors, params)
+                // A custom gap above the block when it follows another section.
+                if let blockTopInset = item.blockTopInset, case .otherSection = neighbors.top {
+                    insets.top = blockTopInset
+                }
             }
             
             let layout = ListViewItemNodeLayout(contentSize: contentSize, insets: insets)
@@ -609,7 +670,9 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
                             iconY = floor((layout.contentSize.height - icon.size.height) / 2.0)
                         }
                         strongSelf.iconNode.frame = CGRect(origin: CGPoint(x: params.leftInset + floor((leftInset - params.leftInset - icon.size.width) / 2.0), y: iconY), size: icon.size)
+                        strongSelf.updateIconAnimation(item.iconAnimation)
                     } else if strongSelf.iconNode.supernode != nil {
+                        strongSelf.updateIconAnimation(nil)
                         strongSelf.iconNode.image = nil
                         strongSelf.iconNode.removeFromSupernode()
                     }

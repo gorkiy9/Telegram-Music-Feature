@@ -33,6 +33,7 @@ enum MusicSection: Equatable {
     case artists
     case playlists
     case favorites
+    case playlist(Int)
 }
 
 private final class MusicTabBarContextReferenceContentSource: ContextReferenceContentSource {
@@ -62,6 +63,8 @@ public final class MusicScreen: ViewController {
     private let context: AccountContext
     let mode: Mode
     let section: MusicSection
+    /// Set on the screens of the sheet that picks tracks for a playlist.
+    let picker: MusicTrackPicker?
     private var library: MusicLibrary?
     private var presentationData: PresentationData
     private var presentationDataDisposable: Disposable?
@@ -85,10 +88,18 @@ public final class MusicScreen: ViewController {
         self.init(context: context, mode: mode, section: .hub, library: nil)
     }
 
-    init(context: AccountContext, mode: Mode, section: MusicSection, library: MusicLibrary?) {
+    /// The sheet that adds tracks to a playlist: the hub, and the lists pushed from it, each row with an add control.
+    static func trackPicker(context: AccountContext, library: MusicLibrary, picker: MusicTrackPicker) -> MusicScreen {
+        let controller = MusicScreen(context: context, mode: .navigation, section: .hub, library: library, picker: picker)
+        controller.navigationPresentation = .modal
+        return controller
+    }
+
+    init(context: AccountContext, mode: Mode, section: MusicSection, library: MusicLibrary?, picker: MusicTrackPicker? = nil) {
         self.context = context
         self.mode = mode
         self.section = section
+        self.picker = picker
         self.library = library
         self.presentationData = context.sharedContext.currentPresentationData.with { $0 }
         self.globalControlPanelsContext = GlobalControlPanelsContext(
@@ -173,12 +184,37 @@ public final class MusicScreen: ViewController {
         self.musicNode.revealSearch()
     }
 
+    /// A playlist's cover keeps the status bar white while it is under it.
+    func updateStatusBar(overCover: Bool) {
+        self.statusBar.updateStatusBarStyle(overCover ? .White : self.presentationData.theme.rootController.statusBarStyle.style, animated: true)
+    }
+
     func goBack() {
         let _ = (self.navigationController as? NavigationController)?.popViewController(animated: true)
     }
 
     func open(section: MusicSection, library: MusicLibrary) {
-        (self.navigationController as? NavigationController)?.pushViewController(MusicScreen(context: self.context, mode: .navigation, section: section, library: library))
+        self.isReturningFromSection = true
+        (self.navigationController as? NavigationController)?.pushViewController(MusicScreen(context: self.context, mode: .navigation, section: section, library: library, picker: self.picker))
+    }
+
+    /// Applies the picked tracks and closes the whole sheet.
+    func finishPicking() {
+        guard let picker = self.picker, let navigationController = self.navigationController as? NavigationController else {
+            return
+        }
+        picker.commit()
+        let controllers = navigationController.viewControllers.filter { controller in
+            if let controller = controller as? MusicScreen, controller.picker === picker {
+                return false
+            }
+            return true
+        }
+        navigationController.setViewControllers(controllers, animated: true)
+    }
+
+    private var rootNavigationController: NavigationController? {
+        return (self.navigationController as? NavigationController) ?? (self.context.sharedContext.mainWindow?.viewController as? NavigationController)
     }
 
     func play(track: MusicTrack, tracks: [MusicTrack], library: MusicLibrary) {
@@ -186,23 +222,105 @@ public final class MusicScreen: ViewController {
         self.context.sharedContext.mediaManager.setPlaylist((self.context, PeerMessagesMediaPlaylist(context: self.context, location: location, chatLocationContextHolder: nil)), type: .music, control: .playback(.togglePlayPause))
     }
 
+    /// The name and photo card, a description and tracks: a sheet like the one that creates a channel.
     func createPlaylist(library: MusicLibrary, completion: ((MusicPlaylist) -> Void)?) {
+        self.rootNavigationController?.pushViewController(musicPlaylistEditScreen(context: self.context, library: library, playlist: nil, completion: { playlist in
+            completion?(playlist)
+        }))
+    }
+
+    func editPlaylist(_ playlist: MusicPlaylist, library: MusicLibrary) {
+        self.rootNavigationController?.pushViewController(musicPlaylistEditScreen(context: self.context, library: library, playlist: playlist, completion: { _ in
+        }))
+    }
+
+    /// The same sheet as from the playlist's editor, adding straight to the playlist.
+    func addTracks(to playlist: MusicPlaylist, library: MusicLibrary) {
+        let picker = MusicTrackPicker(playlistTitle: playlist.title, trackIds: playlist.trackIds, completion: { [weak library] trackIds in
+            library?.updatePlaylist(id: playlist.id, { playlist in
+                playlist.trackIds = trackIds
+            })
+        })
+        self.rootNavigationController?.pushViewController(MusicScreen.trackPicker(context: self.context, library: library, picker: picker))
+    }
+
+    func setFavorite(playlist: MusicPlaylist, isFavorite: Bool, library: MusicLibrary) {
+        library.updatePlaylist(id: playlist.id, { playlist in
+            playlist.isFavorite = isFavorite
+        })
+    }
+
+    func setInProfile(playlist: MusicPlaylist, isInProfile: Bool, library: MusicLibrary) {
+        library.updatePlaylist(id: playlist.id, { playlist in
+            playlist.isInProfile = isInProfile
+        })
         let strings = self.presentationData.strings
-        self.present(promptController(
-            context: self.context,
-            text: musicString(strings, ru: "Новый плейлист", en: "New Playlist"),
-            value: nil,
-            placeholder: musicString(strings, ru: "Название", en: "Title"),
-            characterLimit: 64,
-            apply: { [weak library] value in
-                guard let title = value?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
-                    return
-                }
-                if let playlist = library?.createPlaylist(title: title) {
-                    completion?(playlist)
-                }
+        self.presentToast(text: isInProfile ? musicString(strings, ru: "Плейлист добавлен в профиль", en: "The playlist was added to your profile") : musicString(strings, ru: "Плейлист убран из профиля", en: "The playlist was removed from your profile"), iconName: "Peer Info/SavedMusic")
+    }
+
+    func play(playlist: MusicPlaylist, shuffled: Bool, library: MusicLibrary) {
+        var tracks = library.tracks(of: playlist)
+        if shuffled {
+            tracks.shuffle()
+        }
+        guard let first = tracks.first else {
+            return
+        }
+        self.play(track: first, tracks: tracks, library: library)
+    }
+
+    /// With nothing from the section playing the playlist simply starts.
+    func enqueue(playlist: MusicPlaylist, next: Bool, library: MusicLibrary) {
+        let tracks = library.tracks(of: playlist)
+        guard !tracks.isEmpty else {
+            return
+        }
+        library.enqueue(tracks: tracks, next: next, completion: { [weak self, weak library] queued in
+            guard let self, let library else {
+                return
             }
-        ), in: .window(.root))
+            let strings = self.presentationData.strings
+            if queued {
+                self.presentToast(text: next ? musicString(strings, ru: "Плейлист будет следующим", en: "The playlist will play next") : musicString(strings, ru: "Плейлист добавлен в очередь", en: "The playlist was added to the queue"), iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
+            } else {
+                self.play(track: tracks[0], tracks: tracks, library: library)
+            }
+        })
+    }
+
+    /// Chat tracks are forwarded as their messages; saved ones have none, so a playlist of them sends its first file.
+    func share(playlist: MusicPlaylist, library: MusicLibrary) {
+        let tracks = library.tracks(of: playlist)
+        let chatMessages = tracks.filter { !$0.isSaved }.map(\.message)
+        let subject: ShareControllerSubject
+        if !chatMessages.isEmpty {
+            subject = .messages(chatMessages)
+        } else if let file = tracks.first?.file {
+            subject = .media(.standalone(media: file), nil)
+        } else {
+            return
+        }
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject)), in: .window(.root))
+    }
+
+    func confirmRemoval(playlist: MusicPlaylist, library: MusicLibrary, completion: (() -> Void)? = nil) {
+        let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
+        let strings = presentationData.strings
+        let actionSheet = ActionSheetController(presentationData: presentationData)
+        actionSheet.setItemGroups([
+            ActionSheetItemGroup(items: [
+                ActionSheetTextItem(title: musicString(strings, ru: "Треки останутся в музыке.", en: "The tracks stay in your music.")),
+                ActionSheetButtonItem(title: musicString(strings, ru: "Удалить плейлист", en: "Delete Playlist"), color: .destructive, action: { [weak actionSheet, weak library] in
+                    actionSheet?.dismissAnimated()
+                    library?.removePlaylist(id: playlist.id)
+                    completion?()
+                })
+            ]),
+            ActionSheetItemGroup(items: [ActionSheetButtonItem(title: strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
+                actionSheet?.dismissAnimated()
+            })])
+        ])
+        self.present(actionSheet, in: .window(.root))
     }
 
     /// The menu also opens on a tab that is not selected, and every section lives under this one.
@@ -243,11 +361,11 @@ public final class MusicScreen: ViewController {
                 guard let self, let library else {
                     return
                 }
-                self.createPlaylist(library: library, completion: { [weak self, weak library] _ in
+                self.createPlaylist(library: library, completion: { [weak self, weak library] playlist in
                     guard let self, let library else {
                         return
                     }
-                    self.openFromMenu(section: .playlists, library: library)
+                    self.openFromMenu(section: .playlist(playlist.id), library: library)
                 })
             }),
             .separator,
@@ -317,7 +435,7 @@ public final class MusicScreen: ViewController {
         }
     }
 
-    private func presentToast(text: String, iconName: String) {
+    func presentToast(text: String, iconName: String) {
         let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
         guard let image = generateTintedImage(image: UIImage(bundleImageName: iconName), color: .white) else {
             return
@@ -329,7 +447,7 @@ public final class MusicScreen: ViewController {
 
     /// With nothing from the section playing there is no queue to join, so the track simply starts.
     func enqueue(track: MusicTrack, next: Bool, library: MusicLibrary) {
-        library.enqueue(track: track, next: next, completion: { [weak self, weak library] queued in
+        library.enqueue(tracks: [track], next: next, completion: { [weak self, weak library] queued in
             guard let self, let library else {
                 return
             }
@@ -344,15 +462,23 @@ public final class MusicScreen: ViewController {
 
     /// Playlists are local stand-ins: the choice is kept with the playlist in memory.
     func addToPlaylist(track: MusicTrack, library: MusicLibrary) {
+        self.addToPlaylist(tracks: [track], excluding: nil, library: library)
+    }
+
+    func addToPlaylist(tracks: [MusicTrack], excluding excludedId: Int?, library: MusicLibrary) {
+        guard !tracks.isEmpty else {
+            return
+        }
         let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
         let strings = presentationData.strings
         let actionSheet = ActionSheetController(presentationData: presentationData)
         let added: (MusicPlaylist) -> Void = { [weak self, weak library] playlist in
-            library?.add(track: track, to: playlist)
-            self?.presentToast(text: musicString(strings, ru: "Трек добавлен в «\(playlist.title)»", en: "The track was added to “\(playlist.title)”"), iconName: "Chat/Context Menu/AddCaption")
+            library?.add(tracks: tracks, to: playlist.id)
+            let text = tracks.count == 1 ? musicString(strings, ru: "Трек добавлен в «\(playlist.title)»", en: "The track was added to “\(playlist.title)”") : musicString(strings, ru: "Треки добавлены в «\(playlist.title)»", en: "The tracks were added to “\(playlist.title)”")
+            self?.presentToast(text: text, iconName: "Chat/Context Menu/AddCaption")
         }
         var items: [ActionSheetItem] = [ActionSheetTextItem(title: musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"))]
-        for playlist in library.playlists {
+        for playlist in library.playlists where playlist.id != excludedId {
             items.append(ActionSheetButtonItem(title: playlist.title, action: { [weak actionSheet] in
                 actionSheet?.dismissAnimated()
                 added(playlist)
@@ -464,6 +590,18 @@ public final class MusicScreen: ViewController {
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         self.musicNode.refresh()
+    }
+
+    /// Set while a pushed section is on top, so coming back from it does not replay the hub icons.
+    private var isReturningFromSection = false
+
+    override public func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if self.isReturningFromSection {
+            self.isReturningFromSection = false
+        } else {
+            self.musicNode.playHubIcons()
+        }
     }
 
     override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {

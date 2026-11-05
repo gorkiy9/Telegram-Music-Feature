@@ -77,6 +77,17 @@ public enum ListMessageItemSelectionSide {
     case right
 }
 
+/// A control before the row's content, as in an editable list: adds the row to something or takes it out.
+public struct ListMessageItemEditControl {
+    public let icon: UIImage
+    public let action: () -> Void
+
+    public init(icon: UIImage, action: @escaping () -> Void) {
+        self.icon = icon
+        self.action = action
+    }
+}
+
 public final class ListMessageItem: ListViewItem, ItemListItem {
     let presentationData: ChatPresentationData
     let systemStyle: ItemListSystemStyle
@@ -104,6 +115,11 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let canReorder: Bool
     let leftRevealOptions: [ListMessageItemRevealOption]
     let rightRevealOptions: [ListMessageItemRevealOption]
+    /// A static glyph at the end of the row, such as a favorite mark.
+    let trailingIcon: UIImage?
+    let editControl: ListMessageItemEditControl?
+    /// A music track shows its cover alone in place of the play button: the row itself plays it.
+    let displaysAudioCover: Bool
     let style: ItemListStyle
     
     let header: ListViewItemHeader?
@@ -152,6 +168,9 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         richMessageQueueId: EngineMessage.Id? = nil,
         leftRevealOptions: [ListMessageItemRevealOption] = [],
         rightRevealOptions: [ListMessageItemRevealOption] = [],
+        trailingIcon: UIImage? = nil,
+        editControl: ListMessageItemEditControl? = nil,
+        displaysAudioCover: Bool = false,
         style: ItemListStyle = .plain,
         sectionId: ItemListSectionId = 0
     ) {
@@ -187,6 +206,9 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.canReorder = canReorder
         self.leftRevealOptions = leftRevealOptions
         self.rightRevealOptions = rightRevealOptions
+        self.trailingIcon = trailingIcon
+        self.editControl = editControl
+        self.displaysAudioCover = displaysAudioCover
         self.style = style
         self.sectionId = sectionId
     }

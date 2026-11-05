@@ -220,6 +220,10 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
     let contextAction: ((ASDisplayNode, ContextGesture?, CGPoint?) -> Void)?
     let arrowAction: (() -> Void)?
     let arrowIsDisclosure: Bool
+    /// A static glyph before the arrow, such as a favorite mark.
+    let trailingIcon: UIImage?
+    /// Draws the row like a chat list row: a 60 pt avatar and a semibold title.
+    let isLarge: Bool
     let animationCache: AnimationCache?
     let animationRenderer: MultiAnimationRenderer?
     let storyStats: (total: Int, unseen: Int, hasUnseenCloseFriends: Bool, hasLiveItems: Bool)?
@@ -281,6 +285,8 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         itemHighlighting: ContactItemHighlighting? = nil,
         contextAction: ((ASDisplayNode, ContextGesture?, CGPoint?) -> Void)? = nil, arrowAction: (() -> Void)? = nil,
         arrowIsDisclosure: Bool = false,
+        trailingIcon: UIImage? = nil,
+        isLarge: Bool = false,
         animationCache: AnimationCache? = nil,
         animationRenderer: MultiAnimationRenderer? = nil,
         storyStats: (total: Int, unseen: Int, hasUnseenCloseFriends: Bool, hasLiveItems: Bool)? = nil,
@@ -324,6 +330,8 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         self.contextAction = contextAction
         self.arrowAction = arrowAction
         self.arrowIsDisclosure = arrowIsDisclosure
+        self.trailingIcon = trailingIcon
+        self.isLarge = isLarge
         self.animationCache = animationCache
         self.animationRenderer = animationRenderer
         self.storyStats = storyStats
@@ -461,6 +469,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
 }
 
 private let avatarFont = avatarPlaceholderFont(size: 16.0)
+private let largeAvatarFont = avatarPlaceholderFont(size: 26.0)
 
 public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
     private let backgroundNode: ASDisplayNode
@@ -501,6 +510,7 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
     private var actionButtonNodes: [HighlightableButtonNode]?
     private var moreButtonNode: MoreButtonNode?
     private var arrowButtonNode: HighlightableButtonNode?
+    private var trailingIconNode: ASImageNode?
     private let labelBadgeNode: ASImageNode
     private var rightLabelTextNode: TextNode?
     
@@ -679,7 +689,8 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
             }
             
             if isExtracted {
-                strongSelf.extractedBackgroundImageNode.image = generateStretchableFilledCircleImage(diameter: 28.0, color: item.presentationData.theme.list.plainBackgroundColor)
+                // A large row lifts out as a card: 26 pt corners, like the list cards around it.
+                strongSelf.extractedBackgroundImageNode.image = generateStretchableFilledCircleImage(diameter: item.isLarge ? 52.0 : 28.0, color: item.presentationData.theme.list.plainBackgroundColor)
             }
             
             if let extractedRect = strongSelf.extractedRect, let nonExtractedRect = strongSelf.nonExtractedRect {
@@ -692,7 +703,17 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
             }
             transition.updateTransform(node: strongSelf.labelBadgeNode, transform: CGAffineTransformMakeTranslation(isExtracted ? -24.0 : 0.0, 0.0))
             
-            transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? 12.0 : 0.0, y: 0.0))
+            // A large row keeps its 12 pt content inset inside the lifted card, and its arrow and trailing glyph stay inside it too.
+            let extractedOffset: CGFloat = item.isLarge ? 16.0 : 12.0
+            if item.isLarge {
+                if let arrowButtonNode = strongSelf.arrowButtonNode {
+                    transition.updateTransform(node: arrowButtonNode, transform: CGAffineTransformMakeTranslation(isExtracted ? -extractedOffset * 2.0 : 0.0, 0.0))
+                }
+                if let trailingIconNode = strongSelf.trailingIconNode {
+                    transition.updateTransform(node: trailingIconNode, transform: CGAffineTransformMakeTranslation(isExtracted ? -extractedOffset * 2.0 : 0.0, 0.0))
+                }
+            }
+            transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? extractedOffset : 0.0, y: 0.0))
             transition.updateAlpha(node: strongSelf.extractedBackgroundImageNode, alpha: isExtracted ? 1.0 : 0.0, completion: { _ in
                 if !isExtracted {
                     self?.extractedBackgroundImageNode.image = nil
@@ -803,8 +824,16 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
         return { [weak self] item, params, first, last, firstWithHeader, neighbors in
             var updatedTheme: PresentationTheme?
             
-            let titleFont = Font.regular(item.presentationData.fontSize.itemListBaseFontSize)
-            let titleBoldFont = Font.medium(item.presentationData.fontSize.itemListBaseFontSize)
+            let titleFont: UIFont
+            let titleBoldFont: UIFont
+            if item.isLarge {
+                // The chat list title: semibold 16 at the default text size.
+                titleFont = Font.semibold(floor(item.presentationData.fontSize.itemListBaseFontSize * 16.0 / 17.0))
+                titleBoldFont = titleFont
+            } else {
+                titleFont = Font.regular(item.presentationData.fontSize.itemListBaseFontSize)
+                titleBoldFont = Font.medium(item.presentationData.fontSize.itemListBaseFontSize)
+            }
             
             let statusFontSize: CGFloat
             if case .app = item.peerMode {
@@ -815,12 +844,14 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
             let statusFont = Font.regular(floor(item.presentationData.fontSize.itemListBaseFontSize * statusFontSize / 17.0))
             
             let badgeFont = Font.regular(14.0)
-            let avatarDiameter = min(40.0, floor(item.presentationData.fontSize.itemListBaseFontSize * 40.0 / 17.0))
+            let avatarDiameter = item.isLarge ? min(60.0, floor(item.presentationData.fontSize.itemListBaseFontSize * 60.0 / 17.0)) : min(40.0, floor(item.presentationData.fontSize.itemListBaseFontSize * 40.0 / 17.0))
             
             if currentItem?.presentationData.theme !== item.presentationData.theme {
                 updatedTheme = item.presentationData.theme
             }
-            var leftInset: CGFloat = 65.0 + params.leftInset
+            var leftInset: CGFloat = (item.isLarge ? 82.0 : 65.0) + params.leftInset
+            // The avatar sits this far before the text: 15 pt from the edge, 12 pt for a large one.
+            let avatarLeading: CGFloat = item.isLarge ? 70.0 : 50.0
             var rightInset: CGFloat = 10.0 + params.rightInset
             
             if case .thread = item.peer {
@@ -1081,7 +1112,7 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
                 
                 switch item.status {
                 case let .custom(text, multiline, isActive, icon):
-                    let statusAttributedStringValue = NSMutableAttributedString(string: "")
+                    let statusAttributedStringValue = NSMutableAttributedString(string: text.string)
                     statusAttributedStringValue.addAttribute(.font, value: statusFont, range: NSRange(location: 0, length: text.length))
                     statusAttributedStringValue.addAttribute(.foregroundColor, value: isActive ? item.presentationData.theme.list.itemAccentColor : item.presentationData.theme.list.itemSecondaryTextColor, range: NSRange(location: 0, length: text.length))
                     text.enumerateAttributes(in: NSRange(location: 0, length: text.length), using: { attributes, range, _ in
@@ -1165,6 +1196,9 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
             
             additionalTitleInset += badgeSize
             
+            if let trailingIcon = item.trailingIcon {
+                additionalTitleInset += trailingIcon.size.width + 12.0
+            }
             if let arrowButtonImage = arrowButtonImage {
                 additionalTitleInset += arrowButtonImage.size.width + 4.0
             }
@@ -1226,6 +1260,12 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
                 statusHeightComponent = 0.0
             } else {
                 statusHeightComponent = -1.0 + statusLayout.size.height
+            }
+            
+            if item.isLarge {
+                // A large row is as tall as its avatar plus 8 pt above and below; the text block is centered in it.
+                let rowHeight = avatarDiameter + 16.0
+                verticalInset = max(verticalInset, floor((rowHeight - titleLayout.size.height - statusHeightComponent) / 2.0))
             }
             
             let nodeLayout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: verticalInset * 2.0 + titleLayout.size.height + statusHeightComponent), insets: UIEdgeInsets(top: firstWithHeader ? 29.0 : 0.0, left: 0.0, bottom: 0.0, right: 0.0))
@@ -1352,6 +1392,7 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
                                         strongSelf.avatarNode.setPeer(context: item.context, theme: item.presentationData.theme, peer: peer, overrideImage: overrideImage, emptyColor: item.presentationData.theme.list.mediaPlaceholderColor, clipStyle: clipStyle, synchronousLoad: synchronousLoads, displayDimensions: displayDimensions)
                                     }
                                 case let .deviceContact(_, contact):
+                                    strongSelf.avatarNode.font = item.isLarge ? largeAvatarFont : avatarFont
                                     let letters: [String]
                                     if !contact.firstName.isEmpty && !contact.lastName.isEmpty {
                                         letters = [contact.firstName[..<contact.firstName.index(after: contact.firstName.startIndex)].uppercased(), contact.lastName[..<contact.lastName.index(after: contact.lastName.startIndex)].uppercased()]
@@ -1448,7 +1489,7 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
                                 avatarSize = CGSize(width: avatarDiameter, height: avatarDiameter)
                             }
                             
-                            let avatarFrame = CGRect(origin: CGPoint(x: revealOffset + leftInset - 50.0, y: floor((nodeLayout.contentSize.height - avatarSize.height) / 2.0)), size: avatarSize)
+                            let avatarFrame = CGRect(origin: CGPoint(x: revealOffset + leftInset - avatarLeading, y: floor((nodeLayout.contentSize.height - avatarSize.height) / 2.0)), size: avatarSize)
                             
                             strongSelf.avatarNode.frame = CGRect(origin: CGPoint(), size: avatarFrame.size)
                             
@@ -1885,6 +1926,27 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
                             } else if let arrowButtonNode = strongSelf.arrowButtonNode {
                                 strongSelf.arrowButtonNode = nil
                                 arrowButtonNode.removeFromSupernode()
+                            }
+                            
+                            if let trailingIcon = item.trailingIcon {
+                                let trailingIconNode: ASImageNode
+                                if let current = strongSelf.trailingIconNode {
+                                    trailingIconNode = current
+                                } else {
+                                    trailingIconNode = ASImageNode()
+                                    trailingIconNode.displaysAsynchronously = false
+                                    strongSelf.trailingIconNode = trailingIconNode
+                                    strongSelf.offsetContainerNode.addSubnode(trailingIconNode)
+                                }
+                                trailingIconNode.image = trailingIcon
+                                var trailingIconRightInset: CGFloat = 12.0
+                                if let arrowButtonImage = arrowButtonImage {
+                                    trailingIconRightInset += arrowButtonImage.size.width + 12.0
+                                }
+                                transition.updateFrame(node: trailingIconNode, frame: CGRect(origin: CGPoint(x: params.width - params.rightInset - trailingIconRightInset - trailingIcon.size.width, y: floor((nodeLayout.contentSize.height - trailingIcon.size.height) / 2.0)), size: trailingIcon.size))
+                            } else if let trailingIconNode = strongSelf.trailingIconNode {
+                                strongSelf.trailingIconNode = nil
+                                trailingIconNode.removeFromSupernode()
                             }
                             
                             let badgeBackgroundWidth: CGFloat

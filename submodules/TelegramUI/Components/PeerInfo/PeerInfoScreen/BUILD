@@ -21,6 +21,7 @@ swift_library(
         "//submodules/ActivityIndicator",
         "//submodules/TelegramUI/Components/AnimationCache",
         "//submodules/AnimationUI",
+        "//submodules/TelegramUI/Components/DynamicIslandMask",
         "//submodules/AppBundle",
         "//submodules/AsyncDisplayKit",
         "//submodules/TelegramUI/Components/AvatarEditorScreen",

@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import AsyncDisplayKit
+import DynamicIslandMask
 import TelegramPresentationData
 import PeerInfoAvatarListNode
 import SwiftSignalKit

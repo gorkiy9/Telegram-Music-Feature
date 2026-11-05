@@ -54,6 +54,8 @@ struct MusicSorting: Equatable {
         case artist
         case lastPlayed
         case dateUpdated
+        /// The order a playlist was built in: ascending is that order, descending reverses it.
+        case playlistOrder
     }
 
     var key: Key
@@ -65,7 +67,7 @@ struct MusicSorting: Equatable {
             return MusicSorting(key: key, ascending: !self.ascending)
         }
         switch key {
-        case .title, .artist:
+        case .title, .artist, .playlistOrder:
             return MusicSorting(key: key, ascending: true)
         case .dateAdded, .lastPlayed, .dateUpdated:
             return MusicSorting(key: key, ascending: false)
@@ -73,11 +75,19 @@ struct MusicSorting: Equatable {
     }
 }
 
-/// The API has no playlists: Playlists shows this local stand-in until it does.
-struct MusicPlaylist {
+/// The API has no playlists: they are local stand-ins kept in memory until it does.
+struct MusicPlaylist: Equatable {
     let id: Int
-    let title: String
-    var trackIds: [EngineMessage.Id] = []
+    var title: String
+    var description: String
+    var isFavorite: Bool
+    /// A local stand-in as well: the profile has no place for playlists.
+    var isInProfile: Bool = false
+    var trackIds: [EngineMessage.Id]
+    /// The cover picked on this device, stored in the media box as a local file.
+    var cover: TelegramMediaImageRepresentation? = nil
+    let dateAdded: Int32
+    var dateUpdated: Int32
 }
 
 /// Which tracks a list shows.
@@ -85,6 +95,7 @@ enum MusicTrackSource: Equatable {
     case all
     case artist(String)
     case favorites
+    case playlist(Int)
 }
 
 /// Files picked out on this device: the API has neither favorites nor a way to take a chat's file out of the music.
@@ -96,12 +107,44 @@ private struct MusicTabSettings: Codable {
     let isShown: Bool
 }
 
+/// Playlists kept on this device until the API can hold them. Tracks are kept by their file, which stays the same
+/// across launches, while the message a track is listed under may not.
+private struct MusicStoredPlaylists: Codable {
+    struct FileId: Codable, Hashable {
+        let namespace: Int32
+        let id: Int64
+    }
+
+    struct Cover: Codable {
+        /// A `LocalFileMediaResource` in the media box.
+        let fileId: Int64
+        let width: Int32
+        let height: Int32
+    }
+
+    struct Playlist: Codable {
+        /// Int32: the item cache's encoder has no plain Int.
+        let id: Int32
+        let title: String
+        let description: String
+        let isFavorite: Bool
+        let isInProfile: Bool
+        let fileIds: [FileId]
+        let cover: Cover?
+        let dateAdded: Int32
+        let dateUpdated: Int32
+    }
+
+    let playlists: [Playlist]
+}
+
 /// The section's local state shares one item cache collection, one entry per kind.
 private enum MusicCacheKey: Int32 {
     // 0 held play counts, which nothing reads any more.
     case favorites = 1
     case removed = 2
     case tabSettings = 3
+    case playlists = 4
 
     var buffer: EngineDataBuffer {
         let key = EngineDataBuffer(length: 4)
@@ -153,6 +196,11 @@ final class MusicLibrary {
     private var favoriteFileIds = Set<Int64>()
     /// Chat files taken out of the music. Saved tracks are removed from the profile instead.
     private var removedFileIds = Set<Int64>()
+    /// Stored tracks of each playlist that are not in the loaded music yet: the chat audio arrives page by page.
+    private var pendingPlaylistFileIds: [Int: [MusicStoredPlaylists.FileId]] = [:]
+    private var didLoadPlaylists = false
+    private var editedPlaylistIds = Set<Int>()
+    private let playlistsDisposable = MetaDisposable()
 
     /// What the player goes through when a track is started here; Play Next and Add to Queue edit it while it plays.
     private var queue: [EngineRawMessage] = []
@@ -186,7 +234,8 @@ final class MusicLibrary {
     init(context: AccountContext, playlistTitle: String) {
         self.context = context
         self.savedMusicContext = ProfileSavedMusicContext(account: context.account, peerId: context.account.peerId)
-        self.playlists = [MusicPlaylist(id: 0, title: playlistTitle)]
+        let now = Int32(Date().timeIntervalSince1970)
+        self.playlists = [MusicPlaylist(id: 0, title: playlistTitle, description: "", isFavorite: false, trackIds: [], dateAdded: now, dateUpdated: now)]
 
         // The saved-music playlist already turns the list into messages; rows and playlist then share their ids.
         let savedLocation = PeerMessagesPlaylistLocation.savedMusic(context: self.savedMusicContext, at: 0, canReorder: false)
@@ -232,6 +281,113 @@ final class MusicLibrary {
             self.removedFileIds.formUnion(removed?.get(MusicFileIdList.self)?.fileIds ?? [])
             self.notifyUpdated()
         }))
+
+        self.playlistsDisposable.set((context.engine.data.get(
+            TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.playlists.buffer)
+        )
+        |> deliverOnMainQueue).start(next: { [weak self] entry in
+            guard let self else {
+                return
+            }
+            self.didLoadPlaylists = true
+            guard let stored = entry?.get(MusicStoredPlaylists.self) else {
+                if self.playlists.contains(where: { $0.id != 0 }) {
+                    self.storePlaylists()
+                }
+                return
+            }
+            let createdMeanwhile = self.playlists.filter { $0.id != 0 }
+            self.playlists = stored.playlists.map { playlist in
+                let cover = playlist.cover.flatMap { cover in
+                    return TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: cover.width, height: cover.height), resource: LocalFileMediaResource(fileId: cover.fileId), progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
+                }
+                self.pendingPlaylistFileIds[Int(playlist.id)] = playlist.fileIds
+                return MusicPlaylist(id: Int(playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: [], cover: cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+            }
+            for var playlist in createdMeanwhile {
+                playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: playlist.trackIds, cover: playlist.cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+                self.playlists.append(playlist)
+            }
+            if !createdMeanwhile.isEmpty {
+                self.storePlaylists()
+            }
+            self.notifyUpdated()
+        }))
+    }
+
+    /// Turns stored files into the tracks now loaded, keeping each playlist's order.
+    private func resolvePlaylistTracks() {
+        guard !self.pendingPlaylistFileIds.isEmpty else {
+            return
+        }
+        let messageIds = self.trackMessageIdsByFile()
+        for (playlistId, fileIds) in self.pendingPlaylistFileIds {
+            guard let index = self.playlists.firstIndex(where: { $0.id == playlistId }) else {
+                self.pendingPlaylistFileIds[playlistId] = nil
+                continue
+            }
+            if self.editedPlaylistIds.contains(playlistId) {
+                var remaining: [MusicStoredPlaylists.FileId] = []
+                for fileId in fileIds {
+                    if let messageId = messageIds[fileId] {
+                        if !self.playlists[index].trackIds.contains(messageId) {
+                            self.playlists[index].trackIds.append(messageId)
+                        }
+                    } else {
+                        remaining.append(fileId)
+                    }
+                }
+                self.pendingPlaylistFileIds[playlistId] = remaining.isEmpty ? nil : remaining
+            } else {
+                // Untouched since launch: the stored order, as far as the music has loaded.
+                let resolved = fileIds.compactMap { messageIds[$0] }
+                if resolved != self.playlists[index].trackIds {
+                    self.playlists[index].trackIds = resolved
+                }
+                if resolved.count == fileIds.count {
+                    self.pendingPlaylistFileIds[playlistId] = nil
+                }
+            }
+        }
+    }
+
+    private func trackMessageIdsByFile() -> [MusicStoredPlaylists.FileId: EngineMessage.Id] {
+        var messageIds: [MusicStoredPlaylists.FileId: EngineMessage.Id] = [:]
+        for track in self.allTracks {
+            if let fileId = musicFileId(track.message) {
+                let key = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
+                if messageIds[key] == nil {
+                    messageIds[key] = track.message.id
+                }
+            }
+        }
+        return messageIds
+    }
+
+    private func storePlaylists() {
+        // Until the stored list has been read, a write would replace it.
+        guard self.didLoadPlaylists else {
+            return
+        }
+        var fileIds: [EngineMessage.Id: MusicStoredPlaylists.FileId] = [:]
+        for track in self.allTracks {
+            if let fileId = musicFileId(track.message) {
+                fileIds[track.message.id] = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
+            }
+        }
+        let stored = MusicStoredPlaylists(playlists: self.playlists.map { playlist in
+            var playlistFileIds = playlist.trackIds.compactMap { fileIds[$0] }
+            // Stored tracks the music has not loaded yet stay in the playlist.
+            for fileId in self.pendingPlaylistFileIds[playlist.id] ?? [] where !playlistFileIds.contains(fileId) {
+                playlistFileIds.append(fileId)
+            }
+            var cover: MusicStoredPlaylists.Cover?
+            if let representation = playlist.cover, let resource = representation.resource as? LocalFileMediaResource {
+                cover = MusicStoredPlaylists.Cover(fileId: resource.fileId, width: representation.dimensions.width, height: representation.dimensions.height)
+            }
+            return MusicStoredPlaylists.Playlist(id: Int32(clamping: playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, fileIds: playlistFileIds, cover: cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+        })
+        let _ = self.context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.playlists.buffer, item: stored).startStandalone()
     }
 
     deinit {
@@ -241,27 +397,82 @@ final class MusicLibrary {
         self.chatRefreshDisposable.dispose()
         self.uploadDisposable.dispose()
         self.fileListsDisposable.dispose()
+        self.playlistsDisposable.dispose()
     }
 
-    /// Lives as long as the library: the API has nowhere to keep it.
+    // MARK: Playlists
+    // They live as long as the library: the API has nowhere to keep them.
+
+    func playlist(id: Int) -> MusicPlaylist? {
+        return self.playlists.first(where: { $0.id == id })
+    }
+
     @discardableResult
-    func createPlaylist(title: String) -> MusicPlaylist {
-        let playlist = MusicPlaylist(id: self.playlists.count, title: title)
+    func createPlaylist(title: String, description: String = "", trackIds: [EngineMessage.Id] = [], cover: TelegramMediaImageRepresentation? = nil) -> MusicPlaylist {
+        let now = Int32(Date().timeIntervalSince1970)
+        let playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: title, description: description, isFavorite: false, trackIds: trackIds, cover: cover, dateAdded: now, dateUpdated: now)
         self.playlists.append(playlist)
+        self.storePlaylists()
         self.notifyUpdated()
         return playlist
     }
 
-    /// Kept in memory with the stand-in playlists; no screen shows a playlist's tracks yet.
-    func add(track: MusicTrack, to playlist: MusicPlaylist) {
-        guard let index = self.playlists.firstIndex(where: { $0.id == playlist.id }) else {
+    func updatePlaylist(id: Int, _ f: (inout MusicPlaylist) -> Void) {
+        guard let index = self.playlists.firstIndex(where: { $0.id == id }) else {
             return
         }
-        var trackIds = self.playlists[index].trackIds
-        if !trackIds.contains(track.message.id) {
-            trackIds.append(track.message.id)
+        var playlist = self.playlists[index]
+        f(&playlist)
+        if playlist != self.playlists[index] {
+            playlist.dateUpdated = Int32(Date().timeIntervalSince1970)
+            if playlist.trackIds != self.playlists[index].trackIds, let pending = self.pendingPlaylistFileIds[id] {
+                // An edit of the list replaces it; stored tracks still loading join its end when they arrive.
+                let loaded = self.trackMessageIdsByFile()
+                self.pendingPlaylistFileIds[id] = pending.filter { loaded[$0] == nil }
+                self.editedPlaylistIds.insert(id)
+            }
+            self.playlists[index] = playlist
+            self.storePlaylists()
+            self.notifyUpdated()
         }
-        self.playlists[index] = MusicPlaylist(id: playlist.id, title: playlist.title, trackIds: trackIds)
+    }
+
+    func removePlaylist(id: Int) {
+        self.playlists.removeAll(where: { $0.id == id })
+        self.pendingPlaylistFileIds[id] = nil
+        self.storePlaylists()
+        self.notifyUpdated()
+    }
+
+    func add(tracks: [MusicTrack], to playlistId: Int) {
+        self.updatePlaylist(id: playlistId, { playlist in
+            for track in tracks where !playlist.trackIds.contains(track.message.id) {
+                playlist.trackIds.append(track.message.id)
+            }
+        })
+    }
+
+    /// Tracks in the playlist's own order; a track that left the music leaves the playlist's list too.
+    func tracks(of playlist: MusicPlaylist) -> [MusicTrack] {
+        let tracks = self.allTracks
+        var byId: [EngineMessage.Id: MusicTrack] = [:]
+        for track in tracks {
+            byId[track.message.id] = track
+        }
+        return playlist.trackIds.compactMap { byId[$0] }
+    }
+
+    func playlists(sorting: MusicSorting) -> [MusicPlaylist] {
+        let isOrdered: (MusicPlaylist, MusicPlaylist) -> Bool
+        switch sorting.key {
+        case .title, .artist:
+            isOrdered = { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .dateAdded, .lastPlayed, .playlistOrder:
+            isOrdered = { $0.dateAdded < $1.dateAdded || ($0.dateAdded == $1.dateAdded && $0.id < $1.id) }
+        case .dateUpdated:
+            isOrdered = { $0.dateUpdated < $1.dateUpdated || ($0.dateUpdated == $1.dateUpdated && $0.id < $1.id) }
+        }
+        return self.playlists.sorted { sorting.ascending ? isOrdered($0, $1) : isOrdered($1, $0) }
     }
 
     func isFavorite(_ track: MusicTrack) -> Bool {
@@ -372,6 +583,11 @@ final class MusicLibrary {
             tracks = tracks.filter { $0.artist?.lowercased() == artist }
         case .favorites:
             tracks = tracks.filter { self.isFavorite($0) }
+        case let .playlist(id):
+            tracks = self.playlist(id: id).flatMap { self.tracks(of: $0) } ?? []
+            if sorting.key == .playlistOrder {
+                return sorting.ascending ? tracks : tracks.reversed()
+            }
         }
         let isOrdered: (MusicTrack, MusicTrack) -> Bool
         switch sorting.key {
@@ -383,7 +599,7 @@ final class MusicLibrary {
                 }
                 return $0.title.localizedStandardCompare($1.title) == .orderedAscending
             }
-        case .dateAdded, .lastPlayed, .dateUpdated:
+        case .dateAdded, .lastPlayed, .dateUpdated, .playlistOrder:
             isOrdered = { $0.message.timestamp < $1.message.timestamp }
         case .title:
             isOrdered = { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
@@ -454,9 +670,9 @@ final class MusicLibrary {
         return .custom(messages: queue, canReorder: false, at: track.message.id, loadMore: nil, hidePanel: false)
     }
 
-    /// Puts the track right after the playing one, or at the end of the queue.
+    /// Puts the tracks right after the playing one, or at the end of the queue, in their order.
     /// Completes with false when nothing from this section is playing: there is no queue to edit.
-    func enqueue(track: MusicTrack, next: Bool, completion: @escaping (Bool) -> Void) {
+    func enqueue(tracks: [MusicTrack], next: Bool, completion: @escaping (Bool) -> Void) {
         let _ = (self.context.sharedContext.mediaManager.musicMediaPlayerState
         |> take(1)
         |> deliverOnMainQueue).start(next: { [weak self] state in
@@ -466,13 +682,13 @@ final class MusicLibrary {
             }
             var queue = self.queue
             let currentId = queue[currentIndex].id
-            if track.message.id != currentId {
-                queue.removeAll(where: { $0.id == track.message.id })
-                if next, let index = queue.firstIndex(where: { $0.id == currentId }) {
-                    queue.insert(track.message, at: index + 1)
-                } else {
-                    queue.append(track.message)
-                }
+            let messages = tracks.map(\.message).filter { $0.id != currentId }
+            let movedIds = Set(messages.map(\.id))
+            queue.removeAll(where: { movedIds.contains($0.id) })
+            if next, let index = queue.firstIndex(where: { $0.id == currentId }) {
+                queue.insert(contentsOf: messages, at: index + 1)
+            } else {
+                queue.append(contentsOf: messages)
             }
             self.queue = queue
             self.queuePromise.set(.single(queue))
@@ -497,6 +713,7 @@ final class MusicLibrary {
     }
 
     private func notifyUpdated() {
+        self.resolvePlaylistTracks()
         self.updated.putNext(Void())
     }
 }

@@ -42,8 +42,10 @@ public struct ItemListRevealOption: Equatable {
     public let iconColor: UIColor
     public let textColor: UIColor
     public let isDestructive: Bool
+    /// An option with an icon may keep its title for accessibility only: the shape then shows the icon alone.
+    public let displaysTitle: Bool
 
-    public init(key: Int32, title: String, icon: ItemListRevealOptionIcon, color: UIColor, iconColor: UIColor, textColor: UIColor, isDestructive: Bool = false) {
+    public init(key: Int32, title: String, icon: ItemListRevealOptionIcon, color: UIColor, iconColor: UIColor, textColor: UIColor, isDestructive: Bool = false, displaysTitle: Bool = true) {
         self.key = key
         self.title = title
         self.icon = icon
@@ -51,10 +53,14 @@ public struct ItemListRevealOption: Equatable {
         self.iconColor = iconColor
         self.textColor = textColor
         self.isDestructive = isDestructive
+        self.displaysTitle = displaysTitle
     }
 
     public static func ==(lhs: ItemListRevealOption, rhs: ItemListRevealOption) -> Bool {
         if lhs.isDestructive != rhs.isDestructive {
+            return false
+        }
+        if lhs.displaysTitle != rhs.displaysTitle {
             return false
         }
         if lhs.key != rhs.key {
@@ -182,7 +188,11 @@ private struct ItemListRevealOptionLayoutMetrics {
         return floorToScreenPixels((self.slotWidth - self.shapeSize.width) / 2.0)
     }
 
-    static func metrics(for height: CGFloat, hasVisualIcons: Bool) -> ItemListRevealOptionLayoutMetrics {
+    static func metrics(for height: CGFloat, hasVisualIcons: Bool, isSymbolOnly: Bool = false) -> ItemListRevealOptionLayoutMetrics {
+        if isSymbolOnly && hasVisualIcons {
+            // Icon-only capsules: no title below, so the shape takes the title's height.
+            return ItemListRevealOptionLayoutMetrics(shapeSize: CGSize(width: 60.0, height: 44.0), slotWidth: 60.0, titleWidth: 0.0, iconMaxSide: 24.0, cornerRadius: 22.0, expandedIconInset: 18.0)
+        }
         let regularShapeSize = CGSize(width: 50.0, height: 50.0)
         let compactShapeSize = CGSize(width: 60.0, height: 32.0)
         let regularContentHeight = regularShapeSize.height + titleSpacing + ceil(titleFont.lineHeight)
@@ -241,6 +251,7 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
 
     private let enableAnimations: Bool
     private let displaysTitleInsidePill: Bool
+    let isSymbolOnly: Bool
 
     private var animationScale: CGFloat = 1.0
     private var animationNodeOffset: CGFloat = 0.0
@@ -261,6 +272,9 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
     }
 
     var titleWidthForGroupPillSizing: CGFloat {
+        if self.isSymbolOnly {
+            return 0.0
+        }
         var titleWidth = self.titleNode.updateLayout(CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)).width
         if self.displaysTitleInsidePill {
             titleWidth += iconlessTitleHorizontalPadding
@@ -268,7 +282,7 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
         return titleWidth
     }
 
-    init(title: String, icon: ItemListRevealOptionIcon, color: UIColor, iconColor: UIColor, textColor: UIColor, enableAnimations: Bool) {
+    init(title: String, icon: ItemListRevealOptionIcon, color: UIColor, iconColor: UIColor, textColor: UIColor, displaysTitle: Bool = true, enableAnimations: Bool) {
         self.contentContainerNode = ASDisplayNode()
         self.backgroundNode = ASDisplayNode()
         self.highlightNode = ASDisplayNode()
@@ -286,6 +300,8 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
             displaysTitleInsidePill = false
         }
         self.displaysTitleInsidePill = displaysTitleInsidePill
+        self.isSymbolOnly = !displaysTitle && !displaysTitleInsidePill
+        self.titleNode.isHidden = self.isSymbolOnly
         self.titleNode.attributedText = NSAttributedString(string: title, font: displaysTitleInsidePill ? iconlessTitleFont : titleFont, textColor: displaysTitleInsidePill ? iconColor : textColor)
 
         self.enableAnimations = enableAnimations
@@ -323,6 +339,12 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
         }
 
         super.init()
+
+        if self.isSymbolOnly {
+            self.isAccessibilityElement = true
+            self.accessibilityLabel = title
+            self.accessibilityTraits = .button
+        }
 
         self.contentContainerNode.layer.allowsGroupOpacity = true
         self.addSubnode(self.contentContainerNode)
@@ -480,7 +502,7 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
 
         let pillSize = metrics.shapeSize
         let shapeY: CGFloat
-        if self.displaysTitleInsidePill {
+        if self.displaysTitleInsidePill || self.isSymbolOnly {
             shapeY = floorToScreenPixels((bounds.height - pillSize.height) / 2.0)
         } else {
             let contentHeight = pillSize.height + titleSpacing + titleSize.height
@@ -642,7 +664,7 @@ private final class ItemListRevealOptionNode: ASDisplayNode {
     }
 
     override func calculateSizeThatFits(_ constrainedSize: CGSize) -> CGSize {
-        let metrics = ItemListRevealOptionLayoutMetrics.metrics(for: constrainedSize.height, hasVisualIcons: !self.displaysTitleInsidePill)
+        let metrics = ItemListRevealOptionLayoutMetrics.metrics(for: constrainedSize.height, hasVisualIcons: !self.displaysTitleInsidePill, isSymbolOnly: self.isSymbolOnly)
         return CGSize(width: metrics.slotWidth, height: constrainedSize.height)
     }
 }
@@ -710,7 +732,7 @@ public final class ItemListRevealOptionsNode: ASDisplayNode {
                 node.removeFromSupernode()
             }
             self.optionNodes = options.map { option in
-                return ItemListRevealOptionNode(title: option.title, icon: option.icon, color: option.color, iconColor: option.iconColor, textColor: option.textColor, enableAnimations: enableAnimations)
+                return ItemListRevealOptionNode(title: option.title, icon: option.icon, color: option.color, iconColor: option.iconColor, textColor: option.textColor, displaysTitle: option.displaysTitle, enableAnimations: enableAnimations)
             }
             if isLeft {
                 for node in self.optionNodes.reversed() {
@@ -731,7 +753,7 @@ public final class ItemListRevealOptionsNode: ASDisplayNode {
             return currentMetrics.metrics
         }
 
-        let metrics = ItemListRevealOptionLayoutMetrics.metrics(for: containerSize.height, hasVisualIcons: self.options.contains(where: { $0.icon.hasVisualIcon }))
+        let metrics = ItemListRevealOptionLayoutMetrics.metrics(for: containerSize.height, hasVisualIcons: self.options.contains(where: { $0.icon.hasVisualIcon }), isSymbolOnly: !self.options.isEmpty && self.options.allSatisfy({ !$0.displaysTitle && $0.icon.hasVisualIcon }))
         let maxTitleWidth = self.optionNodes.reduce(0.0) { result, node in
             return max(result, node.titleWidthForGroupPillSizing)
         }

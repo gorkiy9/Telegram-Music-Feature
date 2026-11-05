@@ -1,14 +1,14 @@
 import Foundation
 import UIKit
 import AsyncDisplayKit
-import TelegramPresentationData
 import AnimationUI
 import Display
 
-final class DynamicIslandMaskNode: ASDisplayNode {
-    var animationNode: AnimationNode?
+/// The profile avatar's mask that melts it into the Dynamic Island as the header scrolls (`UserAvatarMask` animation).
+public final class DynamicIslandMaskNode: ASDisplayNode {
+    public var animationNode: AnimationNode?
     
-    var isForum = false {
+    public var isForum = false {
         didSet {
             if self.isForum != oldValue {
                 self.animationNode?.removeFromSupernode()
@@ -19,7 +19,7 @@ final class DynamicIslandMaskNode: ASDisplayNode {
         }
     }
     
-    override init() {
+    override public init() {
         let animationNode = AnimationNode(animation: "UserAvatarMask")
         self.animationNode = animationNode
         
@@ -28,29 +28,34 @@ final class DynamicIslandMaskNode: ASDisplayNode {
         self.addSubnode(animationNode)
     }
     
-    func update(_ value: CGFloat) {
+    public func update(_ value: CGFloat) {
         self.animationNode?.setProgress(value)
     }
     
-    var animating = false
+    public var animating = false
     
-    override func layout() {
+    override public func layout() {
         self.animationNode?.frame = self.bounds
     }
 }
 
-final class DynamicIslandBlurNode: ASDisplayNode {
+/// The blur and dark fade over an avatar going into the Dynamic Island.
+public final class DynamicIslandBlurNode: ASDisplayNode {
     private var effectView: UIVisualEffectView?
     private let fadeNode = ASDisplayNode()
-    let gradientNode = ASImageNode()
+    public let gradientNode = ASImageNode()
 
     private var hierarchyTrackingNode: HierarchyTrackingNode?
+
+    override public init() {
+        super.init()
+    }
     
     deinit {
         self.animator?.stopAnimation(true)
     }
     
-    override func didLoad() {
+    override public func didLoad() {
         super.didLoad()
         
         let hierarchyTrackingNode = HierarchyTrackingNode({ [weak self] value in
@@ -91,7 +96,7 @@ final class DynamicIslandBlurNode: ASDisplayNode {
     
     private var animator: UIViewPropertyAnimator?
     
-    func prepare() -> Bool {
+    public func prepare() -> Bool {
         guard self.animator == nil else {
             return false
         }
@@ -104,7 +109,7 @@ final class DynamicIslandBlurNode: ASDisplayNode {
         return true
     }
     
-    func update(_ value: CGFloat) {
+    public func update(_ value: CGFloat) {
         let fadeAlpha = min(1.0, max(0.0, -0.25 + value * 1.55))
         if value > 0.0 {
             var value = value
@@ -121,7 +126,7 @@ final class DynamicIslandBlurNode: ASDisplayNode {
         self.fadeNode.alpha = fadeAlpha
     }
     
-    override func layout() {
+    override public func layout() {
         super.layout()
         
         self.effectView?.frame = self.bounds

@@ -347,6 +347,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
     
     private var extractedRect: CGRect?
     private var nonExtractedRect: CGRect?
+    private var extractedContentOffset: CGFloat = 12.0
     
     private let offsetContainerNode: ASDisplayNode
     
@@ -356,6 +357,11 @@ public final class ListMessageFileItemNode: ListMessageNode {
     private let maskNode: ASImageNode
     
     private var selectionNode: ItemListSelectableControlNode?
+    private var editControlNode: HighlightableButtonNode?
+    private var editControlAction: (() -> Void)?
+    private var trailingIconNode: ASImageNode?
+    /// Tints a selected cover row while the list selects tracks.
+    private var selectionTintNode: ASDisplayNode?
     
     public let titleNode: DescriptionNode
     public let textNode: TextNode
@@ -524,7 +530,14 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             if isExtracted {
-                strongSelf.extractedBackgroundImageNode.image = generateStretchableFilledCircleImage(diameter: 28.0, color: item.presentationData.theme.theme.list.itemModalBlocksBackgroundColor)
+                let diameter: CGFloat
+                if case .blocks = item.style {
+                    // The card's own glass corner radius (26), so the preview matches the card it lifts out of.
+                    diameter = 52.0
+                } else {
+                    diameter = 28.0
+                }
+                strongSelf.extractedBackgroundImageNode.image = generateStretchableFilledCircleImage(diameter: diameter, color: item.presentationData.theme.theme.list.itemModalBlocksBackgroundColor)
             }
             
             if let extractedRect = strongSelf.extractedRect, let nonExtractedRect = strongSelf.nonExtractedRect {
@@ -532,7 +545,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 transition.updateFrame(node: strongSelf.extractedBackgroundImageNode, frame: rect)
             }
             
-            transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? 12.0 : 0.0, y: 0.0))
+            transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? strongSelf.extractedContentOffset : 0.0, y: 0.0))
             transition.updateAlpha(node: strongSelf.extractedBackgroundImageNode, alpha: isExtracted ? 1.0 : 0.0, completion: { _ in
                 if !isExtracted {
                     self?.extractedBackgroundImageNode.image = nil
@@ -555,6 +568,10 @@ public final class ListMessageFileItemNode: ListMessageNode {
     
     override func setupItem(_ item: ListMessageItem) {
         self.item = item
+    }
+    
+    @objc private func editControlPressed() {
+        self.editControlAction?()
     }
     
     @objc private func iconButtonPressed() {
@@ -641,7 +658,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
             
             let iconCornerRadius: CGFloat = item.systemStyle == .glass ? 12.0 : 6.0
             
-            let leftInset: CGFloat = 65.0 + params.leftInset
+            var leftInset: CGFloat = 65.0 + params.leftInset
             let rightInset: CGFloat = 8.0 + params.rightInset
             
             var leftOffset: CGFloat = 0.0
@@ -656,6 +673,11 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 case .right:
                     rightOffset += selectionWidth
                 }
+            }
+            
+            let editControlWidth: CGFloat = 38.0
+            if item.editControl != nil {
+                leftOffset += editControlWidth
             }
             
             var extensionIconImage: UIImage?
@@ -1033,6 +1055,16 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 captionText = text
             }
             
+            // A cover row: 44 pt cover at the row's inset, text 12 pt after it, 62 pt tall (Figma Audio Row).
+            let displaysCover = item.displaysAudioCover && isAudio && !isVoice
+            let coverSize: CGFloat = 44.0
+            // While selecting, the cover keeps 56 pt from the edge, right after the check (Figma Music / List Edit).
+            let coverSideInset: CGFloat = leftOffset > 0.0 ? max(0.0, 56.0 - leftOffset) : 16.0
+            if displaysCover {
+                leftInset = coverSideInset + coverSize + 12.0 + params.leftInset
+            }
+            let iconSideLength: CGFloat = displaysCover ? coverSize : 40.0
+
             var reorderInset: CGFloat = 0.0
             
             if item.canReorder {
@@ -1042,6 +1074,9 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             var contentRightInset = rightInset + rightOffset + reorderInset
+            if let trailingIcon = item.trailingIcon {
+                contentRightInset += trailingIcon.size.width + 8.0
+            }
             if !item.isGlobalSearchResult {
                 contentRightInset += 16.0
             }
@@ -1073,7 +1108,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                         let arguments = TransformImageArguments(corners: imageCorners, imageSize: representation.dimensions.cgSize.aspectFilled(iconSize), boundingSize: iconSize, intrinsicInsets: UIEdgeInsets(), emptyColor: item.presentationData.theme.theme.list.mediaPlaceholderColor)
                         iconImageApply = iconImageLayout(arguments)
                     case .albumArt:
-                        let iconSize = CGSize(width: 40.0, height: 40.0)
+                        let iconSize = CGSize(width: iconSideLength, height: iconSideLength)
                         let imageCorners = ImageCorners(radius: iconSize.width / 2.0)
                         let arguments = TransformImageArguments(corners: imageCorners, imageSize: iconSize, boundingSize: iconSize, intrinsicInsets: UIEdgeInsets(), emptyColor: item.presentationData.theme.theme.list.mediaPlaceholderColor)
                         iconImageApply = iconImageLayout(arguments)
@@ -1098,7 +1133,12 @@ public final class ListMessageFileItemNode: ListMessageNode {
                                     updateIconImageSignal = .complete()
                                 }
                             case let .albumArt(file, albumArt):
-                                updateIconImageSignal = playerAlbumArt(engine: item.context.engine, fileReference: .message(message: MessageReference(message), media: file), albumArt: albumArt, thumbnail: true, overlayColor: UIColor(white: 0.0, alpha: 0.3), emptyColor: item.presentationData.theme.theme.list.itemAccentColor)
+                                if displaysCover {
+                                    // The cover is the content here, not a backdrop for a button: no dimming, and the player's own placeholder when the track has none.
+                                    updateIconImageSignal = playerAlbumArt(engine: item.context.engine, fileReference: .message(message: MessageReference(message), media: file), albumArt: albumArt, thumbnail: true, placeholderIconSize: 20.0)
+                                } else {
+                                    updateIconImageSignal = playerAlbumArt(engine: item.context.engine, fileReference: .message(message: MessageReference(message), media: file), albumArt: albumArt, thumbnail: true, overlayColor: UIColor(white: 0.0, alpha: 0.3), emptyColor: item.presentationData.theme.theme.list.itemAccentColor)
+                                }
                             case let .roundVideo(file):
                                 updateIconImageSignal = mediaGridMessageVideo(postbox: item.context.account.postbox, userLocation: .peer(message.id.peerId), videoReference: FileMediaReference.message(message: MessageReference(message), media: file), autoFetchFullSizeThumbnail: true, overlayColor: UIColor(white: 0.0, alpha: 0.3))
                         }
@@ -1123,7 +1163,14 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 verticalInset += 2.0 + UIScreenPixel
             }
             
-            let nodeLayout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: verticalInset * 2.0 + 8.0 * 2.0 + titleNodeLayout.height - 5.0 + descriptionNodeLayout.height + (textNodeLayout.size.height > 0.0 ? textNodeLayout.size.height + 3.0 : 0.0)), insets: insets)
+            let textContentHeight = verticalInset * 2.0 + 8.0 * 2.0 + titleNodeLayout.height - 5.0 + descriptionNodeLayout.height + (textNodeLayout.size.height > 0.0 ? textNodeLayout.size.height + 3.0 : 0.0)
+            var contentHeight = textContentHeight
+            if displaysCover {
+                contentHeight = max(contentHeight, coverSize + 9.0 * 2.0)
+            }
+            // The text keeps its own spacing and is centred in a taller row.
+            let contentOffsetY = floorToScreenPixels((contentHeight - textContentHeight) / 2.0)
+            let nodeLayout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: contentHeight), insets: insets)
             
             return (nodeLayout, { animation in
                 if let strongSelf = self {
@@ -1146,8 +1193,19 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     strongSelf.contextSourceNode.contentNode.frame = CGRect(origin: CGPoint(), size: nodeLayout.contentSize)
                     strongSelf.restrictionNode.frame = CGRect(origin: CGPoint(), size: nodeLayout.contentSize)
                     
-                    let nonExtractedRect = CGRect(origin: CGPoint(), size: CGSize(width: nodeLayout.contentSize.width - 16.0, height: nodeLayout.contentSize.height))
-                    let extractedRect = CGRect(origin: CGPoint(), size: nodeLayout.contentSize).insetBy(dx: 16.0 + params.leftInset, dy: 0.0)
+                    let nonExtractedRect: CGRect
+                    let extractedRect: CGRect
+                    if case .blocks = item.style {
+                        // A block row is already inset into its card, so the preview keeps the card's width and the content stays in place.
+                        let cardRect = CGRect(origin: CGPoint(x: params.leftInset, y: 0.0), size: CGSize(width: nodeLayout.contentSize.width - params.leftInset - params.rightInset, height: nodeLayout.contentSize.height))
+                        nonExtractedRect = cardRect
+                        extractedRect = cardRect
+                        strongSelf.extractedContentOffset = 0.0
+                    } else {
+                        nonExtractedRect = CGRect(origin: CGPoint(), size: CGSize(width: nodeLayout.contentSize.width - 16.0, height: nodeLayout.contentSize.height))
+                        extractedRect = CGRect(origin: CGPoint(), size: nodeLayout.contentSize).insetBy(dx: 16.0 + params.leftInset, dy: 0.0)
+                        strongSelf.extractedContentOffset = 12.0
+                    }
                     strongSelf.extractedRect = extractedRect
                     strongSelf.nonExtractedRect = nonExtractedRect
                     
@@ -1229,6 +1287,41 @@ public final class ListMessageFileItemNode: ListMessageNode {
                         })
                     }
                     
+                    strongSelf.editControlAction = item.editControl?.action
+                    if let editControl = item.editControl {
+                        let editControlNode: HighlightableButtonNode
+                        if let current = strongSelf.editControlNode {
+                            editControlNode = current
+                        } else {
+                            editControlNode = HighlightableButtonNode()
+                            editControlNode.addTarget(strongSelf, action: #selector(strongSelf.editControlPressed), forControlEvents: .touchUpInside)
+                            strongSelf.editControlNode = editControlNode
+                            strongSelf.offsetContainerNode.addSubnode(editControlNode)
+                        }
+                        editControlNode.setImage(editControl.icon, for: .normal)
+                        transition.updateFrame(node: editControlNode, frame: CGRect(origin: CGPoint(x: params.leftInset, y: 0.0), size: CGSize(width: editControlWidth + 12.0, height: nodeLayout.contentSize.height)))
+                    } else if let editControlNode = strongSelf.editControlNode {
+                        strongSelf.editControlNode = nil
+                        editControlNode.removeFromSupernode()
+                    }
+                    
+                    if let trailingIcon = item.trailingIcon {
+                        let trailingIconNode: ASImageNode
+                        if let current = strongSelf.trailingIconNode {
+                            trailingIconNode = current
+                        } else {
+                            trailingIconNode = ASImageNode()
+                            trailingIconNode.displaysAsynchronously = false
+                            strongSelf.trailingIconNode = trailingIconNode
+                            strongSelf.offsetContainerNode.addSubnode(trailingIconNode)
+                        }
+                        trailingIconNode.image = trailingIcon
+                        transition.updateFrame(node: trailingIconNode, frame: CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderInset - 12.0 - trailingIcon.size.width, y: floor((nodeLayout.contentSize.height - trailingIcon.size.height) / 2.0)), size: trailingIcon.size))
+                    } else if let trailingIconNode = strongSelf.trailingIconNode {
+                        strongSelf.trailingIconNode = nil
+                        trailingIconNode.removeFromSupernode()
+                    }
+                    
                     if let reorderControlSizeAndApply = reorderControlSizeAndApply {
                         let reorderControlFrame = CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderControlSizeAndApply.0, y: 0.0), size: CGSize(width: reorderControlSizeAndApply.0, height: nodeLayout.contentSize.height))
                         if strongSelf.reorderControlNode == nil {
@@ -1249,7 +1342,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     
                     transition.updateFrame(node: strongSelf.separatorNode, frame: CGRect(origin: CGPoint(x: leftInset + leftOffset, y: nodeLayout.contentSize.height - UIScreenPixel), size: CGSize(width: params.width - leftInset - leftOffset - separatorRightInset - params.rightInset - rightOffset, height: UIScreenPixel)))
                     let highlightedBackgroundFrame: CGRect
-                    if item.additionalSideInset > 0.0 {
+                    if item.additionalSideInset > 0.0 || displaysCover {
+                        // A cover row's surface is the row itself, not the block spacing above it: a swipe turns it into a capsule.
                         highlightedBackgroundFrame = CGRect(origin: CGPoint(x: item.additionalSideInset, y: 0.0), size: CGSize(width: params.width - item.additionalSideInset * 2.0, height: nodeLayout.contentSize.height))
                     } else {
                         highlightedBackgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: -nodeLayout.insets.top - UIScreenPixel), size: CGSize(width: params.width, height: nodeLayout.size.height + UIScreenPixel - nodeLayout.insets.bottom))
@@ -1269,6 +1363,35 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     }
                     if let backgroundNode = strongSelf.backgroundNode {
                         backgroundNode.frame = backgroundFrame.insetBy(dx: item.additionalSideInset, dy: 0.0)
+                    }
+
+                    var isSelectedCoverRow = false
+                    if displaysCover, case .selectable(true, _) = item.selection {
+                        isSelectedCoverRow = true
+                    }
+                    if isSelectedCoverRow {
+                        let selectionTintNode: ASDisplayNode
+                        if let current = strongSelf.selectionTintNode {
+                            selectionTintNode = current
+                        } else {
+                            selectionTintNode = ASDisplayNode()
+                            selectionTintNode.isLayerBacked = true
+                            strongSelf.selectionTintNode = selectionTintNode
+                            if let backgroundNode = strongSelf.backgroundNode, backgroundNode.supernode === strongSelf {
+                                strongSelf.insertSubnode(selectionTintNode, aboveSubnode: backgroundNode)
+                            } else {
+                                strongSelf.insertSubnode(selectionTintNode, at: 0)
+                            }
+                            selectionTintNode.alpha = 0.0
+                        }
+                        selectionTintNode.backgroundColor = item.presentationData.theme.theme.list.itemAccentColor.withMultipliedAlpha(0.06)
+                        selectionTintNode.frame = CGRect(origin: CGPoint(x: item.additionalSideInset, y: 0.0), size: CGSize(width: params.width - item.additionalSideInset * 2.0, height: nodeLayout.contentSize.height))
+                        transition.updateAlpha(node: selectionTintNode, alpha: 1.0)
+                    } else if let selectionTintNode = strongSelf.selectionTintNode {
+                        strongSelf.selectionTintNode = nil
+                        transition.updateAlpha(node: selectionTintNode, alpha: 0.0, completion: { [weak selectionTintNode] _ in
+                            selectionTintNode?.removeFromSupernode()
+                        })
                     }
                     
                     switch item.style {
@@ -1310,7 +1433,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                         strongSelf.updateRevealOptionsSeparatorNodes(top: nil, bottom: strongSelf.separatorNode, topIsHidden: true, bottomIsHidden: strongSelf.separatorNode.isHidden)
                     }
                     
-                    transition.updateFrame(node: strongSelf.titleNode, frame: CGRect(origin: CGPoint(x: leftOffset + leftInset - 1.0, y: 7.0 + verticalInset), size: titleNodeLayout))
+                    transition.updateFrame(node: strongSelf.titleNode, frame: CGRect(origin: CGPoint(x: leftOffset + leftInset - 1.0, y: 7.0 + verticalInset + contentOffsetY), size: titleNodeLayout))
                     let _ = titleNodeApply()
                     
                     var descriptionOffset: CGFloat = 0.0
@@ -1338,13 +1461,19 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     transition.updateFrame(node: strongSelf.dateNode, frame: CGRect(origin: CGPoint(x: params.width - contentRightInset - dateNodeLayout.size.width, y: 11.0), size: dateNodeLayout.size))
                     strongSelf.dateNode.isHidden = !item.isGlobalSearchResult
                     
-                    let iconSize = CGSize(width: 40.0, height: 40.0)
-                    let iconFrame = CGRect(origin: CGPoint(x: params.leftInset + leftOffset + 12.0, y: 8.0 + verticalInset), size: iconSize)
+                    let iconSize = CGSize(width: iconSideLength, height: iconSideLength)
+                    let iconFrame: CGRect
+                    if displaysCover {
+                        iconFrame = CGRect(origin: CGPoint(x: params.leftInset + leftOffset + coverSideInset, y: floorToScreenPixels((nodeLayout.contentSize.height - iconSize.height) / 2.0)), size: iconSize)
+                    } else {
+                        iconFrame = CGRect(origin: CGPoint(x: params.leftInset + leftOffset + 12.0, y: 8.0 + verticalInset), size: iconSize)
+                    }
                     transition.updateFrame(node: strongSelf.extensionIconNode, frame: iconFrame)
                     strongSelf.extensionIconNode.image = extensionIconImage
                     transition.updateFrame(node: strongSelf.extensionIconText, frame: CGRect(origin: CGPoint(x: iconFrame.minX + floorToScreenPixels((iconFrame.width - extensionTextLayout.size.width) / 2.0), y: iconFrame.minY + 5.0 + floorToScreenPixels((iconFrame.height - extensionTextLayout.size.height) / 2.0)), size: extensionTextLayout.size))
                     
                     transition.updateFrame(node: strongSelf.iconStatusNode, frame: iconFrame)
+                    strongSelf.iconStatusNode.isHidden = displaysCover
                     
                     strongSelf.iconButtonNode.isHidden = item.interaction.toggleMediaPlayback == nil
                     strongSelf.iconButtonNode.frame = iconFrame.insetBy(dx: -8.0, dy: -8.0)
@@ -1353,7 +1482,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     
                     strongSelf.currentIconImage = iconImage
                                 
-                    if let updateIconImageSignal, let iconImage, case .albumArt = iconImage {
+                    if !displaysCover, let updateIconImageSignal, let iconImage, case .albumArt = iconImage {
                         strongSelf.iconStatusNode.setBackgroundImage(updateIconImageSignal, size: CGSize(width: 40.0, height: 40.0))
                     }
                     

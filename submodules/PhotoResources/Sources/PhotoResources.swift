@@ -3063,14 +3063,20 @@ private func albumArtFullSizeDatas(engine: TelegramEngine, file: FileMediaRefere
     })
 }
 
-private func drawAlbumArtPlaceholder(into c: CGContext, arguments: TransformImageArguments, thumbnail: Bool) {
+private func drawAlbumArtPlaceholder(into c: CGContext, arguments: TransformImageArguments, thumbnail: Bool, iconSize: CGFloat? = nil) {
     c.setBlendMode(.copy)
     c.setFillColor(UIColor(rgb: 0xeeeeee).cgColor)
     c.fill(arguments.drawingRect)
     
     c.setBlendMode(.normal)
     
-    if thumbnail {
+    if let iconSize {
+        // A caller-sized note, outside the shared 28 pt thumbnail cache.
+        if let sourceImage = UIImage(bundleImageName: "GlobalMusicPlayer/AlbumArtPlaceholder"), let cgImage = sourceImage.cgImage {
+            let fittedSize = sourceImage.size.aspectFitted(CGSize(width: iconSize, height: iconSize))
+            c.draw(cgImage, in: CGRect(origin: CGPoint(x: floor((arguments.drawingRect.size.width - fittedSize.width) / 2.0), y: floor((arguments.drawingRect.size.height - fittedSize.height) / 2.0)), size: fittedSize))
+        }
+    } else if thumbnail {
         var image: UIImage?
         let precomposed = precomposedSmallAlbumArt.with { $0 }
         if let precomposed = precomposed {
@@ -3102,7 +3108,7 @@ private func drawAlbumArtPlaceholder(into c: CGContext, arguments: TransformImag
     }
 }
 
-public func playerAlbumArt(engine: TelegramEngine, fileReference: FileMediaReference?, albumArt: SharedMediaPlaybackAlbumArt?, thumbnail: Bool, overlayColor: UIColor? = nil, emptyColor: UIColor? = nil, drawPlaceholderWhenEmpty: Bool = true, attemptSynchronously: Bool = false) -> Signal<(TransformImageArguments) -> DrawingContext?, NoError> {
+public func playerAlbumArt(engine: TelegramEngine, fileReference: FileMediaReference?, albumArt: SharedMediaPlaybackAlbumArt?, thumbnail: Bool, overlayColor: UIColor? = nil, emptyColor: UIColor? = nil, drawPlaceholderWhenEmpty: Bool = true, placeholderIconSize: CGFloat? = nil, attemptSynchronously: Bool = false) -> Signal<(TransformImageArguments) -> DrawingContext?, NoError> {
     let postbox = engine.account.postbox
     var fileArtworkData: Signal<Data?, NoError> = .single(nil)
     if let fileReference = fileReference {
@@ -3228,7 +3234,7 @@ public func playerAlbumArt(engine: TelegramEngine, fileReference: FileMediaRefer
                     }
                 } else if drawPlaceholderWhenEmpty {
                     context.withFlippedContext { c in
-                        drawAlbumArtPlaceholder(into: c, arguments: arguments, thumbnail: thumbnail)
+                        drawAlbumArtPlaceholder(into: c, arguments: arguments, thumbnail: thumbnail, iconSize: placeholderIconSize)
                     }
                 } else {
                     return nil
