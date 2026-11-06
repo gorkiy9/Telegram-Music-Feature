@@ -21,6 +21,7 @@ import MediaPlaybackHeaderPanelComponent
 import GlassControls
 import EdgeEffect
 import SearchInputPanelComponent
+import SearchBarNode
 import MultilineTextComponent
 
 private enum MusicListEntryId: Hashable {
@@ -32,6 +33,7 @@ private enum MusicListEntryId: Hashable {
     case playlistHeaderSpacer
     case playlistInfo
     case playlistActions
+    case favoritePlaylistsTile
     case track(EngineMessage.Id)
     case artist(String)
     case playlist(Int)
@@ -52,6 +54,7 @@ private enum MusicListEntryContent {
     case hubTiles(iconPlayTokens: [MusicSection.Row: Int])
     case playback
     case addTracks
+    case favoritePlaylistsTile
     /// The difference between the expanded cover and the round header, as a row: the list's inset stays the round
     /// header's, so folding the cover animates this row's height and the offset the header follows stays continuous.
     case playlistHeaderSpacer(CGFloat)
@@ -79,7 +82,7 @@ private struct MusicListEntry: Comparable, Identifiable {
             return ""
         case let .hubTiles(iconPlayTokens):
             return [MusicSection.Row.songs, .artists, .playlists, .favorites].map { "\(iconPlayTokens[$0] ?? 0)" }.joined(separator: " ")
-        case .playback, .addTracks:
+        case .playback, .addTracks, .favoritePlaylistsTile:
             return ""
         case let .playlistHeaderSpacer(height):
             return "\(height)"
@@ -159,6 +162,7 @@ final class MusicScreenNode: ASDisplayNode {
     private let library: MusicLibrary
     private let section: MusicSection
     private let picker: MusicTrackPicker?
+    private let pickerPromptNode = ImmediateTextNode()
     private var pickerDisposable: Disposable?
     private let listNode = ListViewImpl()
     private let indexNode = CollectionIndexNode()
@@ -203,6 +207,8 @@ final class MusicScreenNode: ASDisplayNode {
     /// Search in the playlist (Figma Playlist / Search): nil while it is closed; the header gives way to the field.
     private var playlistSearchQuery: String?
     private var playlistSearchPanel: ComponentView<Empty>?
+    /// The client's search bar for screens with the navigation bar: it grows out of the bar's field, as in Mini Apps and Contacts.
+    private var searchBarNode: SearchBarNode?
 
     private var playlistHeaderSpacerHeight: CGFloat {
         guard self.isPlaylistHeaderExpanded, let layout = self.validLayout else {
@@ -286,12 +292,13 @@ final class MusicScreenNode: ASDisplayNode {
                 self.controller?.requestLayout(transition: .immediate)
             }
             // The playlist's header rows depend on its description and cover as well.
-            self.updateList(allUpdated: self.isPlaylistScreen)
+            // Once everything has loaded, changes come from the user (delete, favorite, playlist edits) and animate.
+            self.updateList(allUpdated: self.isPlaylistScreen, animated: self.library.isFullyLoaded)
         })
         if let picker = self.picker {
             self.pickerDisposable = (picker.updated.signal()
             |> deliverOnMainQueue).start(next: { [weak self] _ in
-                self?.updateList()
+                self?.updateList(animated: true)
             })
         }
         if self.displaysTabSwitch {
@@ -301,7 +308,7 @@ final class MusicScreenNode: ASDisplayNode {
                     return
                 }
                 self.isTabShown = isShown
-                self.updateList()
+                self.updateList(animated: true)
             })
         }
     }
@@ -375,6 +382,21 @@ final class MusicScreenNode: ASDisplayNode {
         self.library.refreshChatMusic()
     }
 
+    /// The trimmed, lowercased query while search is open and not empty (Figma Search, 251:22733).
+    private var activeSearchQuery: String? {
+        guard let query = self.playlistSearchQuery?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !query.isEmpty else {
+            return nil
+        }
+        return query
+    }
+
+    private func matchesSearch(_ track: MusicTrack) -> Bool {
+        guard let query = self.activeSearchQuery else {
+            return true
+        }
+        return track.title.lowercased().contains(query) || (track.artist?.lowercased().contains(query) ?? false)
+    }
+
     private func makeEntries() -> [MusicListEntry] {
         var contents: [(MusicListEntryId, MusicListEntryContent, String?)] = []
         self.currentTracks = []
@@ -398,13 +420,17 @@ final class MusicScreenNode: ASDisplayNode {
                 contents.append((.tabSwitch, .tabSwitch(isOn: self.isTabShown), nil))
                 contents.append((.tabFooter, .tabFooter, nil))
             }
-            let tracks = self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false))
+            let tracks = self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false)).filter(self.matchesSearch)
             self.currentTracks = tracks
             contents.append((.hubTiles, .hubTiles(iconPlayTokens: self.hubIconPlayTokens), nil))
             appendPlaybackPanel(tracks)
             contents += tracks.map { (.track($0.message.id), trackContent($0), nil) }
         case .songs, .favorites:
-            self.currentTracks = self.library.tracks(source: self.trackSource, sorting: self.sorting)
+            self.currentTracks = self.library.tracks(source: self.trackSource, sorting: self.sorting).filter(self.matchesSearch)
+            if case .favorites = self.section, self.picker == nil {
+                // Favorite playlists are their own category above the tracks (Figma Favorites).
+                contents.append((.favoritePlaylistsTile, .favoritePlaylistsTile, nil))
+            }
             appendPlaybackPanel(self.currentTracks)
             let byArtist = self.sorting.key == .artist
             let hasSections = self.hasAlphabetSections
@@ -428,14 +454,25 @@ final class MusicScreenNode: ASDisplayNode {
                 }
                 contents.append((.playlistActions, .playlistActions(isEmpty: self.currentTracks.isEmpty, isFavorite: playlist.isFavorite), nil))
             } else {
+                if self.picker != nil, !self.currentTracks.isEmpty {
+                    // A playlist opened in the picker: Add and Search under the header (Figma Playlists / Add Track).
+                    contents.append((.playlistActions, .playlistActions(isEmpty: false, isFavorite: false), nil))
+                }
                 appendPlaybackPanel(self.currentTracks)
             }
             contents += self.currentTracks.map { (.track($0.message.id), trackContent($0), nil) }
         case .artists:
-            contents += self.library.artists.map { (.artist($0.name.lowercased()), .artist($0), self.picker == nil ? musicIndexLetter($0.name) : nil) }
-        case .playlists:
+            contents += self.library.artists.filter { artist in
+                return self.activeSearchQuery.flatMap { artist.name.lowercased().contains($0) } ?? true
+            }.map { (.artist($0.name.lowercased()), .artist($0), self.picker == nil ? musicIndexLetter($0.name) : nil) }
+        case let .playlists(favoritesOnly):
             let strings = self.presentationData.strings
-            contents += self.library.playlists(sorting: self.sorting).map { playlist in
+            contents += self.library.playlists(sorting: self.sorting).filter { playlist in
+                guard !favoritesOnly || playlist.isFavorite else {
+                    return false
+                }
+                return self.activeSearchQuery.flatMap { playlist.title.lowercased().contains($0) } ?? true
+            }.map { playlist in
                 return (.playlist(playlist.id), .playlist(playlist, subtitle: musicPlaylistSubtitle(strings, playlist: playlist, library: self.library)), nil)
             }
         }
@@ -485,7 +522,7 @@ final class MusicScreenNode: ASDisplayNode {
         }
         self.isSelecting = isSelecting
         self.selectedTrackIds.removeAll()
-        self.updateList()
+        self.updateList(animated: true)
         self.updateSelectionToolbar()
         self.controller?.requestLayout(transition: .animated(duration: 0.4, curve: .spring))
     }
@@ -503,7 +540,7 @@ final class MusicScreenNode: ASDisplayNode {
         } else {
             self.selectedTrackIds.remove(track.message.id)
         }
-        self.updateList()
+        self.updateList(animated: true)
         self.updateSelectionToolbar()
     }
 
@@ -517,7 +554,7 @@ final class MusicScreenNode: ASDisplayNode {
         } else {
             self.selectedTrackIds = Set(self.currentTracks.map(\.message.id))
         }
-        self.updateList()
+        self.updateList(animated: true)
         self.updateSelectionToolbar()
     }
 
@@ -556,6 +593,7 @@ final class MusicScreenNode: ASDisplayNode {
     private static let selectionPanelHeight: CGFloat = 44.0
     /// Gap between cards on every Music list: hub rows, Play/Shuffle, Add Tracks, tracks.
     static let blockSpacing: CGFloat = 24.0
+    static let pickerPromptHeight: CGFloat = 22.0
 
     private func selectionPanelBottomInset(layout: ContainerViewLayout) -> CGFloat {
         return max(layout.insets(options: []).bottom, 8.0)
@@ -643,8 +681,11 @@ final class MusicScreenNode: ASDisplayNode {
             })
         ]
         let right = [
-            option(2, strings.Common_Edit, "Chat/Context Menu/Edit", actions.accent, false, {
-                // Track editing is not designed yet.
+            option(2, strings.Common_Edit, "Chat/Context Menu/Edit", actions.accent, false, { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.controller?.editTrack(track, library: self.library)
             }),
             option(3, strings.Common_Delete, "Chat/Context Menu/Delete", actions.destructive, true, { [weak self] in
                 guard let self else {
@@ -706,8 +747,11 @@ final class MusicScreenNode: ASDisplayNode {
                 )
             ]), false),
             .separator,
-            action(musicString(strings, ru: "Редактировать", en: "Edit"), .singleLine, "Chat/Context Menu/Edit", false, {
-                // Track editing is not designed yet.
+            action(musicString(strings, ru: "Редактировать", en: "Edit"), .singleLine, "Chat/Context Menu/Edit", false, { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.controller?.editTrack(track, library: self.library)
             }),
             .separator,
             action(musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"), .singleLine, "Chat/Context Menu/AddCaption", false, { [weak self] in
@@ -734,6 +778,15 @@ final class MusicScreenNode: ASDisplayNode {
             }))
         }
         items.append(.separator)
+        if case let .playlist(playlistId) = self.section, self.picker == nil {
+            // Figma 247:17292: takes the track out of this playlist only, the track stays in Music.
+            items.append(action(musicString(strings, ru: "Убрать из плейлиста", en: "Remove from Playlist"), .singleLine, "Chat/Context Menu/Remove", true, {
+                let messageId = track.message.id
+                library.updatePlaylist(id: playlistId, { playlist in
+                    playlist.trackIds.removeAll(where: { $0 == messageId })
+                })
+            }))
+        }
         items.append(action(musicString(strings, ru: "Удалить из музыки", en: "Remove from Music"), .singleLine, "Chat/Context Menu/Delete", true, {
             library.remove(tracks: [track])
         }))
@@ -758,14 +811,13 @@ final class MusicScreenNode: ASDisplayNode {
     }
 
     private func open(row: MusicSection.Row) {
-        self.playHubIcons(rows: [row])
         switch row {
         case .songs:
             self.controller?.open(section: .songs(artist: nil), library: self.library)
         case .artists:
             self.controller?.open(section: .artists, library: self.library)
         case .playlists:
-            self.controller?.open(section: .playlists, library: self.library)
+            self.controller?.open(section: .playlists(favoritesOnly: false), library: self.library)
         case .favorites:
             self.controller?.open(section: .favorites, library: self.library)
         }
@@ -781,7 +833,7 @@ final class MusicScreenNode: ASDisplayNode {
             (.favorites, .favorites, musicString(strings, ru: "Избранное", en: "Favorites"), "anim_musicfavorites")
         ]
         let tiles = rows.map { MusicHubTile(kind: $0.1, title: $0.2, animation: $0.3, playToken: iconPlayTokens[$0.0] ?? 0) }
-        return MusicHubTilesItem(theme: self.presentationData.theme, tiles: tiles, sideInset: 16.0, topInset: self.displaysTabSwitch ? MusicScreenNode.blockSpacing : 16.0, sectionId: 1, action: { [weak self] kind in
+        return MusicHubTilesItem(theme: self.presentationData.theme, tiles: tiles, sideInset: 16.0, topInset: self.displaysTabSwitch ? MusicScreenNode.blockSpacing : 16.0, bottomInset: self.picker != nil ? MusicScreenNode.blockSpacing : 0.0, sectionId: 1, action: { [weak self] kind in
             let row: MusicSection.Row
             switch kind {
             case .songs:
@@ -794,6 +846,18 @@ final class MusicScreenNode: ASDisplayNode {
                 row = .favorites
             }
             self?.open(row: row)
+        })
+    }
+
+    /// The single full-width Playlists tile on top of Favorites: opens the favorite playlists.
+    private func favoritePlaylistsTileItem() -> ListViewItem {
+        let strings = self.presentationData.strings
+        let tile = MusicHubTile(kind: .playlists, title: musicString(strings, ru: "Плейлисты", en: "Playlists"), animation: "anim_musicplaylists", playToken: 0)
+        return MusicHubTilesItem(theme: self.presentationData.theme, tiles: [tile], sideInset: 16.0, topInset: 16.0, sectionId: 1, action: { [weak self] _ in
+            guard let self else {
+                return
+            }
+            self.controller?.open(section: .playlists(favoritesOnly: true), library: self.library)
         })
     }
 
@@ -864,7 +928,7 @@ final class MusicScreenNode: ASDisplayNode {
         return ListMessageItem(presentationData: chatPresentationData, systemStyle: .glass, context: self.context, chatLocation: .peer(id: message.id.peerId), interaction: interaction, message: message, selection: selection, selectionSide: .left, displayHeader: false, customHeader: header, isGlobalSearchResult: !track.isSaved, isSavedMusic: track.isSaved, displayFileInfo: true, audioInfo: .performer, hidesAudioFileExtension: true, additionalSideInset: 0.0, blockTopInset: blockTopInset, displayBackground: false, leftRevealOptions: revealOptions.left, rightRevealOptions: revealOptions.right, trailingIcon: trailingIcon, editControl: editControl, displaysAudioCover: true, style: .plain, sectionId: sectionId)
     }
 
-    private func nameRowItem(id: String, name: String, subtitle: String? = nil, isFavorite: Bool = false, isLarge: Bool = false, cover: TelegramMediaImageRepresentation? = nil, header: ListViewItemHeader?, contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = nil, action: @escaping () -> Void) -> ListViewItem {
+    private func nameRowItem(id: String, name: String, subtitle: String? = nil, isFavorite: Bool = false, isLarge: Bool = false, isMedium: Bool = false, cover: TelegramMediaImageRepresentation? = nil, header: ListViewItemHeader?, contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = nil, action: @escaping () -> Void) -> ListViewItem {
         let presentationData = self.presentationData
         var status: ContactsPeerItemStatus = .none
         if let subtitle {
@@ -878,18 +942,23 @@ final class MusicScreenNode: ASDisplayNode {
         } else {
             peer = .deviceContact(stableId: id, contact: DeviceContactBasicData(firstName: name, lastName: "", phoneNumbers: []))
         }
-        return ContactsPeerItem(presentationData: ItemListPresentationData(presentationData), systemStyle: .glass, sectionId: 1, sortOrder: presentationData.nameSortOrder, displayOrder: presentationData.nameDisplayOrder, context: self.context, peerMode: .peer, peer: peer, status: status, enabled: true, selection: .none, editing: ContactsPeerItemEditing(editable: false, editing: false, revealed: false), index: nil, header: header, hideBackground: true, action: { _ in
+        return ContactsPeerItem(presentationData: ItemListPresentationData(presentationData), systemStyle: .glass, sectionId: 1, sortOrder: presentationData.nameSortOrder, displayOrder: presentationData.nameDisplayOrder, context: self.context, peerMode: .peer, peer: peer, status: status, enabled: true, selection: .none, editing: ContactsPeerItemEditing(editable: false, editing: false, revealed: false), index: nil, header: header, hideBackground: true, action: { [weak self] _ in
+            // As in the client's contact lists: the pressed fill goes away once the row opens its screen.
+            self?.listNode.clearHighlightAnimated(true)
             action()
         }, contextAction: contextAction.flatMap { contextAction in
             return { node, gesture, _ in
                 contextAction(node, gesture)
             }
-        }, arrowAction: action, arrowIsDisclosure: true, trailingIcon: isFavorite ? MusicResources.favoriteMark(theme: presentationData.theme) : nil, isLarge: isLarge)
+        }, arrowAction: { [weak self] in
+            self?.listNode.clearHighlightAnimated(true)
+            action()
+        }, arrowIsDisclosure: true, trailingIcon: isFavorite ? MusicResources.favoriteMark(theme: presentationData.theme) : nil, isLarge: isLarge, isMedium: isMedium)
     }
 
     private func playbackItem() -> ListViewItem {
         let strings = self.presentationData.strings
-        return MusicPlaybackButtonsItem(theme: self.presentationData.theme, playTitle: musicString(strings, ru: "Слушать", en: "Play"), shuffleTitle: musicString(strings, ru: "Перемешать", en: "Shuffle"), sideInset: 16.0, topInset: self.section == .hub ? MusicScreenNode.blockSpacing : 16.0, bottomInset: self.section == .hub ? MusicScreenNode.blockSpacing : 16.0, sectionId: 3, action: { [weak self] shuffled in
+        return MusicPlaybackButtonsItem(theme: self.presentationData.theme, playTitle: musicString(strings, ru: "Слушать", en: "Play"), shuffleTitle: musicString(strings, ru: "Перемешать", en: "Shuffle"), sideInset: 16.0, topInset: self.section == .hub || self.section == .favorites ? MusicScreenNode.blockSpacing : 16.0, bottomInset: 16.0, sectionId: 3, action: { [weak self] shuffled in
             self?.playAll(shuffled: shuffled)
         })
     }
@@ -916,8 +985,9 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         let hasDescription = !(self.currentPlaylist?.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         // The round header already ends 16 pt under the name; under the cover and the description the buttons keep 16 pt of their own.
-        let topInset: CGFloat = !hasDescription && !self.isPlaylistHeaderExpanded ? 8.0 : 16.0
-        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, playTitle: musicString(strings, ru: "Слушать", en: "Play"), addTracksTitle: musicString(strings, ru: "Добавить треки", en: "Add Tracks"), topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
+        let topInset: CGFloat = self.picker != nil ? 16.0 : (!hasDescription && !self.isPlaylistHeaderExpanded ? 8.0 : 16.0)
+        let pickerTitles: (add: String, search: String)? = self.picker != nil ? (musicString(strings, ru: "Добавить", en: "Add"), musicString(strings, ru: "Поиск", en: "Search")) : nil
+        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, playTitle: musicString(strings, ru: "Слушать", en: "Play"), addTracksTitle: musicString(strings, ru: "Добавить треки", en: "Add Tracks"), pickerTitles: pickerTitles, topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
             guard let self, let playlist = self.currentPlaylist else {
                 return
             }
@@ -929,9 +999,14 @@ final class MusicScreenNode: ASDisplayNode {
             case .favorite:
                 self.controller?.setFavorite(playlist: playlist, isFavorite: !playlist.isFavorite, library: self.library)
             case .search:
-                self.setPlaylistSearchActive(true)
+                // Inside the track picker the search has no panel yet (stub, like the nav bar's field).
+                if self.picker == nil {
+                    self.setPlaylistSearchActive(true)
+                }
             case .addTracks:
                 self.controller?.addTracks(to: playlist, library: self.library)
+            case .addAll:
+                self.picker?.add(self.currentTracks)
             }
         })
     }
@@ -1071,6 +1146,8 @@ final class MusicScreenNode: ASDisplayNode {
             return self.tabFooterItem()
         case let .hubTiles(iconPlayTokens):
             return self.hubTilesItem(iconPlayTokens: iconPlayTokens)
+        case .favoritePlaylistsTile:
+            return self.favoritePlaylistsTileItem()
         case .playback:
             return self.playbackItem()
         case .addTracks:
@@ -1084,7 +1161,7 @@ final class MusicScreenNode: ASDisplayNode {
         case let .track(track, isSelected, isFavorite, isPicked):
             return self.trackItem(track: track, isSelected: isSelected, isFavorite: isFavorite, isPicked: isPicked, header: header)
         case let .artist(artist):
-            return self.nameRowItem(id: artist.name, name: artist.name, header: header, action: { [weak self] in
+            return self.nameRowItem(id: artist.name, name: artist.name, isMedium: true, header: header, action: { [weak self] in
                 guard let self else {
                     return
                 }
@@ -1126,7 +1203,7 @@ final class MusicScreenNode: ASDisplayNode {
             scrollToItem: scrollToItem,
             updateOpaqueState: nil
         )
-        self.updateIndex(transition: .immediate)
+        self.updateIndex(transition: animated ? .animated(duration: 0.3, curve: .easeInOut) : .immediate)
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -1151,6 +1228,8 @@ final class MusicScreenNode: ASDisplayNode {
         transition.updateFrame(node: self.indexNode, frame: frame)
         self.indexNode.update(size: frame.size, color: self.presentationData.theme.list.itemAccentColor, sections: sections, transition: transition)
         self.indexNode.isUserInteractionEnabled = !sections.isEmpty
+        // The index fades in and out with a sort by title or artist instead of popping.
+        transition.updateAlpha(node: self.indexNode, alpha: sections.isEmpty ? 0.0 : 1.0)
     }
 
     private func scrollToSection(letter: String) {
@@ -1224,7 +1303,7 @@ final class MusicScreenNode: ASDisplayNode {
                     return
                 }
                 self.sorting = self.sorting.selecting(key)
-                self.updateList(scrollToTop: true)
+                self.updateList(scrollToTop: true, animated: true)
                 self.controller?.requestLayout(transition: .immediate)
             }))
         }
@@ -1252,7 +1331,7 @@ final class MusicScreenNode: ASDisplayNode {
         var items: [ContextMenuItem] = [
             playlist.isInProfile ? action(musicString(strings, ru: "Убрать из профиля", en: "Remove from Profile"), "Chat/Context Menu/Remove", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: false, library: library)
-            }) : action(musicString(strings, ru: "Добавить в профиль", en: "Add to Profile"), "Chat/Context Menu/AddUser", false, { [weak controller] in
+            }) : action(musicString(strings, ru: "Добавить в профиль", en: "Add to Profile"), "Music/AddToProfile", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: true, library: library)
             }),
             .separator,
@@ -1315,7 +1394,7 @@ final class MusicScreenNode: ASDisplayNode {
                     return
                 }
                 self.sorting = self.sorting.selecting(key)
-                self.updateList()
+                self.updateList(animated: true)
             }))
         }
         return items
@@ -1326,7 +1405,7 @@ final class MusicScreenNode: ASDisplayNode {
 
         let addButton = NavigationBarComponent.Button(
             id: "add",
-            content: .icon(imageName: "Chat List/AddIcon"),
+            content: .icon(imageName: "Music/AddTrack"),
             tint: .accent,
             action: { [weak self] _ in
                 guard let self else {
@@ -1423,14 +1502,56 @@ final class MusicScreenNode: ASDisplayNode {
             }
         }
 
+        var titleComponent: AnyComponent<Empty>?
+        if case .playlists(favoritesOnly: true) = self.section, self.picker == nil {
+            // The section's title over the list it belongs to (Figma 239:16727), in the sizes of the collapsed playlist
+            // header and the client's chat title: semibold 17 over regular 13, 1 pt apart.
+            let listTheme = self.presentationData.theme.list
+            titleComponent = AnyComponent(VStack([
+                AnyComponentWithIdentity(id: "title", component: AnyComponent(MultilineTextComponent(
+                    text: .plain(NSAttributedString(string: title, font: Font.semibold(17.0), textColor: listTheme.itemPrimaryTextColor)),
+                    maximumNumberOfLines: 1
+                ))),
+                AnyComponentWithIdentity(id: "subtitle", component: AnyComponent(MultilineTextComponent(
+                    text: .plain(NSAttributedString(string: musicString(strings, ru: "Избранное", en: "Favorites"), font: Font.regular(13.0), textColor: listTheme.itemSecondaryTextColor)),
+                    maximumNumberOfLines: 1
+                )))
+            ], spacing: 1.0))
+        }
+
         return ChatListHeaderComponent.Content(
             title: title,
-            titleComponent: nil,
+            titleComponent: titleComponent,
             chatListTitle: nil,
             leftButton: leftButton,
             rightButtons: rightButtons,
             backPressed: backPressed
         )
+    }
+
+    /// The sheet's prompt line (iOS 27 Prompt): "Add to “Playlist”" above the bar's row.
+    private var pickerPromptInset: CGFloat {
+        return self.picker != nil ? MusicScreenNode.pickerPromptHeight : 0.0
+    }
+
+    private func updatePickerPrompt(layout: ContainerViewLayout) {
+        guard let picker = self.picker else {
+            return
+        }
+        let strings = self.presentationData.strings
+        let theme = self.presentationData.theme
+        if self.pickerPromptNode.supernode == nil {
+            self.pickerPromptNode.maximumNumberOfLines = 1
+            self.pickerPromptNode.truncationType = .end
+        }
+        // Above the bar's glass and edge effect, which are added later and would otherwise blur it.
+        if self.pickerPromptNode.supernode == nil {
+            self.addSubnode(self.pickerPromptNode)
+        }
+        self.view.bringSubviewToFront(self.pickerPromptNode.view)
+        self.pickerPromptNode.attributedText = NSAttributedString(string: musicString(strings, ru: "Добавить в «\(picker.playlistTitle)»", en: "Add to “\(picker.playlistTitle)”"), font: Font.regular(12.0), textColor: theme.rootController.navigationBar.primaryTextColor)
+        let size = self.pickerPromptNode.updateLayout(CGSize(width: layout.size.width - 120.0, height: 20.0))
+        self.pickerPromptNode.frame = CGRect(origin: CGPoint(x: floor((layout.size.width - size.width) / 2.0), y: (layout.navigationBarStatusBarHeight ?? 0.0) + 12.0), size: size)
     }
 
     private func searchPlaceholder() -> String? {
@@ -1485,18 +1606,19 @@ final class MusicScreenNode: ASDisplayNode {
             self.playlistContainerLayoutUpdated(layout, isFirstLayout: isFirstLayout, transition: transition)
             return
         }
+        self.updatePickerPrompt(layout: layout)
         let navigationBarSize = self.navigationBarView.update(
             transition: componentTransition,
             component: AnyComponent(ChatListNavigationBar(
                 context: self.context,
                 theme: self.presentationData.theme,
                 strings: self.presentationData.strings,
-                statusBarHeight: layout.navigationBarStatusBarHeight ?? 0.0,
+                statusBarHeight: (layout.navigationBarStatusBarHeight ?? 0.0) + self.pickerPromptInset,
                 leftInset: layout.safeInsets.left,
                 rightInset: layout.safeInsets.right,
                 trailingButtonsInset: layout.navigationBarTrailingButtonsInset,
                 search: ChatListNavigationBar.Search(isEnabled: true, placeholder: self.searchPlaceholder()),
-                activeSearch: nil,
+                activeSearch: self.playlistSearchQuery != nil ? ChatListNavigationBar.ActiveSearch(isExternal: false) : nil,
                 primaryContent: self.headerContent(),
                 secondaryContent: nil,
                 secondaryTransition: 0.0,
@@ -1508,7 +1630,8 @@ final class MusicScreenNode: ASDisplayNode {
                 tabsNodeIsSearch: false,
                 accessoryPanelContainer: nil,
                 accessoryPanelContainerHeight: 0.0,
-                activateSearch: { _ in
+                activateSearch: { [weak self] _ in
+                    self?.setPlaylistSearchActive(true)
                 },
                 openStatusSetup: { _ in
                 },
@@ -1521,13 +1644,20 @@ final class MusicScreenNode: ASDisplayNode {
         if let navigationBarComponentView = self.navigationBarView.view as? ChatListNavigationBar.View {
             if navigationBarComponentView.superview == nil {
                 self.view.addSubview(navigationBarComponentView)
+                if self.picker != nil, self.pickerPromptNode.supernode != nil {
+                    self.view.bringSubviewToFront(self.pickerPromptNode.view)
+                }
             }
             componentTransition.setFrame(view: navigationBarComponentView, frame: CGRect(origin: CGPoint(), size: navigationBarSize))
         }
 
+        // While searching the bar takes the client's active-search state and its search bar grows out of the field (Figma Search, 251:22733).
+        let isSearching = self.playlistSearchQuery != nil
+        let removedSearchBar = self.updateSearchBar(layout: layout, navigationHeight: navigationBarSize.height, transition: componentTransition)
+
         var insets = layout.insets(options: [.input])
         insets.top = navigationBarSize.height
-        if (self.startsWithPlayback && self.picker == nil) || self.section == .hub {
+        if !isSearching && ((self.startsWithPlayback && self.picker == nil) || self.section == .hub) {
             // The first block's own top inset is for a list under a plain bar.
             insets.top -= 16.0
             if !self.displaysTabSwitch {
@@ -1539,8 +1669,8 @@ final class MusicScreenNode: ASDisplayNode {
         insets.left = layout.safeInsets.left
         insets.right = layout.safeInsets.right
         if self.hasAlphabetSections && self.section == .artists {
-            // Keeps the artists clear of the index; track rows run under it, as in Figma Songs / Sort.
-            insets.right += 16.0
+            // Figma Artists / Main (99:10634): rows run under the 16 pt index, the arrow ends 4 pt before it (20 pt from the edge).
+            insets.right += 8.0
         }
         if self.isSelecting && self.controller?.mode == .navigation {
             insets.bottom = self.selectionPanelBottomInset(layout: layout) + MusicScreenNode.selectionPanelHeight + 8.0
@@ -1555,6 +1685,19 @@ final class MusicScreenNode: ASDisplayNode {
         self.updateSelectionPanel(layout: layout, transition: transition)
 
         self.applyNavigationScroll(transition: componentTransition)
+        // The bar has its field back in place only now, so the search bar folds into where the field ends up.
+        if let removedSearchBar {
+            self.view.bringSubviewToFront(removedSearchBar.view)
+            if !transition.isAnimated {
+                removedSearchBar.view.removeFromSuperview()
+            } else if let placeholderNode = (self.navigationBarView.view as? ChatListNavigationBar.View)?.searchContentNode?.placeholderNode {
+                removedSearchBar.transitionOut(to: placeholderNode, transition: transition, completion: { [weak removedSearchBar] in
+                    removedSearchBar?.view.removeFromSuperview()
+                })
+            } else {
+                removedSearchBar.view.removeFromSuperview()
+            }
+        }
     }
 
     /// The bottom of the playlist's buttons' row: 10 pt under the status bar, as the list bar places its buttons.
@@ -1734,12 +1877,73 @@ final class MusicScreenNode: ASDisplayNode {
         guard (self.playlistSearchQuery != nil) != isActive, let layout = self.validLayout else {
             return
         }
+        if !isActive {
+            // The keyboard leaves together with the bar, as in the client's searches: resign before the layout drops the node.
+            self.searchBarNode?.deactivate(clear: true)
+            self.view.endEditing(true)
+        }
         self.playlistSearchQuery = isActive ? "" : nil
-        self.updateList(allUpdated: true, scrollToTop: true)
-        self.containerLayoutUpdated(layout, transition: .animated(duration: 0.3, curve: .easeInOut))
+        self.updateList(allUpdated: true, scrollToTop: true, animated: true)
+        self.containerLayoutUpdated(layout, transition: .animated(duration: 0.4, curve: .spring))
         if isActive, let panelView = self.playlistSearchPanel?.view as? SearchInputPanelComponent.View {
             panelView.activateInput()
         }
+    }
+
+    /// How far below its open place the field starts: at the bar's own search field, or just under a playlist's bar.
+    private func searchPanelRestingOffset(layout: ContainerViewLayout) -> CGFloat {
+        if !self.isPlaylistScreen, let barView = self.navigationBarView.view {
+            return max(0.0, barView.bounds.height - (layout.statusBarHeight ?? 0.0) - MusicScreenNode.playlistSearchPanelHeight - self.navigationScrollOffset)
+        }
+        return 16.0
+    }
+
+    /// Returns the search bar that has just closed; the caller folds it once the bar is laid out.
+    private func updateSearchBar(layout: ContainerViewLayout, navigationHeight: CGFloat, transition: ComponentTransition) -> SearchBarNode? {
+        let placeholderNode = (self.navigationBarView.view as? ChatListNavigationBar.View)?.searchContentNode?.placeholderNode
+        if self.playlistSearchQuery != nil {
+            let searchBarNode: SearchBarNode
+            var searchBarTransition = transition
+            if let current = self.searchBarNode {
+                searchBarNode = current
+            } else {
+                searchBarTransition = .immediate
+                let theme = self.presentationData.theme
+                let searchBarTheme = SearchBarNodeTheme(theme: theme, hasSeparator: false)
+                searchBarNode = SearchBarNode(theme: searchBarTheme, presentationTheme: theme, strings: self.presentationData.strings, fieldStyle: .glass, displayBackground: false)
+                searchBarNode.placeholderString = NSAttributedString(string: self.searchPlaceholder() ?? self.presentationData.strings.Common_Search, font: Font.regular(17.0), textColor: searchBarTheme.placeholder)
+                self.searchBarNode = searchBarNode
+                searchBarNode.cancel = { [weak self] in
+                    self?.setPlaylistSearchActive(false)
+                }
+                searchBarNode.textUpdated = { [weak self] query, _ in
+                    guard let self, self.playlistSearchQuery != nil, self.playlistSearchQuery != query else {
+                        return
+                    }
+                    self.playlistSearchQuery = query
+                    self.updateList(scrollToTop: true, animated: true)
+                }
+                DispatchQueue.main.async { [weak self, weak searchBarNode] in
+                    guard let self, let searchBarNode, self.searchBarNode === searchBarNode else {
+                        return
+                    }
+                    searchBarNode.activate()
+                }
+            }
+            let searchBarFrame = CGRect(origin: CGPoint(x: 0.0, y: navigationHeight - 54.0 + 2.0), size: CGSize(width: layout.size.width, height: 54.0))
+            searchBarNode.updateLayout(boundingSize: searchBarFrame.size, leftInset: layout.safeInsets.left + 6.0, rightInset: layout.safeInsets.right, transition: searchBarTransition.containedViewLayoutTransition)
+            searchBarTransition.setFrame(view: searchBarNode.view, frame: searchBarFrame)
+            if searchBarNode.view.superview == nil {
+                self.view.addSubview(searchBarNode.view)
+                if case let .curve(duration, _) = transition.animation, let placeholderNode {
+                    searchBarNode.animateIn(from: placeholderNode, duration: duration, timingFunction: kCAMediaTimingFunctionSpring)
+                }
+            }
+        } else if let searchBarNode = self.searchBarNode {
+            self.searchBarNode = nil
+            return searchBarNode
+        }
+        return nil
     }
 
     private func updatePlaylistSearchPanel(layout: ContainerViewLayout, transition: ComponentTransition) {
@@ -1762,14 +1966,14 @@ final class MusicScreenNode: ASDisplayNode {
                     strings: strings,
                     metrics: layout.metrics,
                     safeInsets: UIEdgeInsets(top: 0.0, left: layout.safeInsets.left + 5.0, bottom: 0.0, right: layout.safeInsets.right + 5.0),
-                    placeholder: musicString(strings, ru: "Поиск треков", en: "Search Tracks"),
+                    placeholder: self.isPlaylistScreen ? musicString(strings, ru: "Поиск треков", en: "Search Tracks") : (self.searchPlaceholder() ?? musicString(strings, ru: "Поиск", en: "Search")),
                     hasEdgeEffect: false,
                     updated: { [weak self] query in
                         guard let self, self.playlistSearchQuery != nil, self.playlistSearchQuery != query else {
                             return
                         }
                         self.playlistSearchQuery = query
-                        self.updateList(scrollToTop: true)
+                        self.updateList(scrollToTop: true, animated: true)
                     },
                     cancel: { [weak self] in
                         self?.setPlaylistSearchActive(false)
@@ -1779,16 +1983,20 @@ final class MusicScreenNode: ASDisplayNode {
                 containerSize: CGSize(width: layout.size.width, height: MusicScreenNode.playlistSearchPanelHeight)
             )
             if let panelView = panel.view {
+                let panelFrame = CGRect(origin: CGPoint(x: 0.0, y: layout.statusBarHeight ?? 0.0), size: panelSize)
                 if panelView.superview == nil {
                     self.view.addSubview(panelView)
                     panelView.alpha = 0.0
+                    // The field rises from the bar's search field, as the chat list's search does.
+                    panelView.frame = panelFrame.offsetBy(dx: 0.0, dy: self.searchPanelRestingOffset(layout: layout))
                 }
-                panelView.frame = CGRect(origin: CGPoint(x: 0.0, y: layout.statusBarHeight ?? 0.0), size: panelSize)
+                transition.setFrame(view: panelView, frame: panelFrame)
                 transition.setAlpha(view: panelView, alpha: 1.0)
             }
         } else if let panel = self.playlistSearchPanel {
             self.playlistSearchPanel = nil
             if let panelView = panel.view {
+                transition.setFrame(view: panelView, frame: panelView.frame.offsetBy(dx: 0.0, dy: self.searchPanelRestingOffset(layout: layout)))
                 transition.setAlpha(view: panelView, alpha: 0.0, completion: { [weak panelView] _ in
                     panelView?.removeFromSuperview()
                 })
@@ -1828,7 +2036,10 @@ final class MusicScreenNode: ASDisplayNode {
             return
         }
         // An empty list reports no offset, so the header stays as it was.
-        if case let .known(value) = self.listNode.visibleContentOffset() {
+        if self.playlistSearchQuery != nil {
+            // An active search keeps the bar expanded, as the client's searches do.
+            self.navigationScrollOffset = 0.0
+        } else if case let .known(value) = self.listNode.visibleContentOffset() {
             self.navigationScrollOffset = max(0.0, min(value, ChatListNavigationBar.searchScrollHeight))
         }
         navigationBarComponentView.applyScroll(offset: self.navigationScrollOffset, allowAvatarsExpansion: false, forceUpdate: true, transition: transition)

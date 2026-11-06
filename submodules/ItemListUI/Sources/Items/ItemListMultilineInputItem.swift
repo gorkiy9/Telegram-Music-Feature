@@ -51,9 +51,11 @@ public class ItemListMultilineInputItem: ListViewItem, ItemListItem {
     let minimalHeight: CGFloat?
     let inlineAction: ItemListMultilineInputInlineAction?
     let noInsets: Bool
+    /// Replaces the section gap above the item when another section is above it.
+    let topInset: CGFloat?
     public let tag: ItemListItemTag?
     
-    public init(presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, text: String, placeholder: String, maxLength: ItemListMultilineInputItemTextLimit?, sectionId: ItemListSectionId, style: ItemListStyle, capitalization: Bool = true, autocorrection: Bool = true, returnKeyType: UIReturnKeyType = .default, minimalHeight: CGFloat? = nil, textUpdated: @escaping (String) -> Void, shouldUpdateText: @escaping (String) -> Bool = { _ in return true }, processPaste: ((String) -> Void)? = nil, updatedFocus: ((Bool) -> Void)? = nil, tag: ItemListItemTag? = nil, action: (() -> Void)? = nil, inlineAction: ItemListMultilineInputInlineAction? = nil, noInsets: Bool = false) {
+    public init(presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, text: String, placeholder: String, maxLength: ItemListMultilineInputItemTextLimit?, sectionId: ItemListSectionId, style: ItemListStyle, capitalization: Bool = true, autocorrection: Bool = true, returnKeyType: UIReturnKeyType = .default, minimalHeight: CGFloat? = nil, textUpdated: @escaping (String) -> Void, shouldUpdateText: @escaping (String) -> Bool = { _ in return true }, processPaste: ((String) -> Void)? = nil, updatedFocus: ((Bool) -> Void)? = nil, tag: ItemListItemTag? = nil, action: (() -> Void)? = nil, inlineAction: ItemListMultilineInputInlineAction? = nil, noInsets: Bool = false, topInset: CGFloat? = nil) {
         self.presentationData = presentationData
         self.systemStyle = systemStyle
         self.text = text
@@ -73,6 +75,7 @@ public class ItemListMultilineInputItem: ListViewItem, ItemListItem {
         self.action = action
         self.inlineAction = inlineAction
         self.noInsets = noInsets
+        self.topInset = topInset
     }
     
     public func nodeConfiguredForParams(async: @escaping (@escaping () -> Void) -> Void, params: ListViewItemLayoutParams, synchronousLoads: Bool, neighbors: ListViewItemNeighbors, completion: @escaping (ListViewItemNode, @escaping () -> (Signal<Void, NoError>?, (ListViewItemApply) -> Void)) -> Void) {
@@ -259,7 +262,10 @@ public class ItemListMultilineInputItemNode: ListViewItemNode, ASEditableTextNod
             }
             
             let contentSize = CGSize(width: params.width, height: contentHeight)
-            let insets = item.noInsets ? UIEdgeInsets() : itemListNeighborsGroupedInsets(neighbors, params)
+            var insets = item.noInsets ? UIEdgeInsets() : itemListNeighborsGroupedInsets(neighbors, params)
+            if let topInset = item.topInset, case .otherSection = neighbors.top {
+                insets.top = topInset
+            }
             
             let layout = ListViewItemNodeLayout(contentSize: contentSize, insets: insets)
             let layoutSize = layout.size

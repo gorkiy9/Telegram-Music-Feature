@@ -138,6 +138,25 @@ private struct MusicStoredPlaylists: Codable {
     let playlists: [Playlist]
 }
 
+/// Title, artist and cover changed on the track edit screen, by file id. Kept on this device: the API cannot
+/// change a saved file's metadata.
+private struct MusicStoredTrackEdits: Codable {
+    struct Edit: Codable {
+        let fileId: Int64
+        let title: String
+        let artist: String
+        let cover: MusicStoredPlaylists.Cover?
+    }
+
+    let edits: [Edit]
+}
+
+struct MusicTrackEdit {
+    var title: String
+    var artist: String
+    var cover: TelegramMediaImageRepresentation?
+}
+
 /// The section's local state shares one item cache collection, one entry per kind.
 private enum MusicCacheKey: Int32 {
     // 0 held play counts, which nothing reads any more.
@@ -145,6 +164,7 @@ private enum MusicCacheKey: Int32 {
     case removed = 2
     case tabSettings = 3
     case playlists = 4
+    case trackEdits = 5
 
     var buffer: EngineDataBuffer {
         let key = EngineDataBuffer(length: 4)
@@ -180,6 +200,10 @@ final class MusicLibrary {
     private var chatMessages: [EngineRawMessage] = []
     private var chatSearchState: SearchMessagesState?
     private var chatCanLoadMore = true
+    /// True once every page of chat music has arrived, so later changes come from the user.
+    public var isFullyLoaded: Bool {
+        return !self.chatCanLoadMore
+    }
     private var isLoadingChatMessages = false
 
     private let savedDisposable = MetaDisposable()
@@ -201,13 +225,61 @@ final class MusicLibrary {
     private var didLoadPlaylists = false
     private var editedPlaylistIds = Set<Int>()
     private let playlistsDisposable = MetaDisposable()
+    private let trackEditsDisposable = MetaDisposable()
 
     /// What the player goes through when a track is started here; Play Next and Add to Queue edit it while it plays.
     private var queue: [EngineRawMessage] = []
     private let queuePromise = Promise<[EngineRawMessage]>([])
 
+    private var trackEdits: [Int64: MusicTrackEdit] = [:]
+    private var didLoadTrackEdits = false
+
     var allTracks: [MusicTrack] {
-        return self.savedMessages.map { MusicTrack(message: $0, isSaved: true) } + self.chatTracks()
+        return self.savedMessages.map { MusicTrack(message: self.applyingEdit($0), isSaved: true) } + self.chatTracks()
+    }
+
+    func edit(of track: MusicTrack) -> MusicTrackEdit? {
+        guard let fileId = track.file?.fileId.id else {
+            return nil
+        }
+        return self.trackEdits[fileId]
+    }
+
+    /// Rows and the player draw the message, so an edited track is the same message with its file's audio tags and cover replaced.
+    private func applyingEdit(_ message: EngineRawMessage) -> EngineRawMessage {
+        guard !self.trackEdits.isEmpty else {
+            return message
+        }
+        var media = message.media
+        guard let index = media.firstIndex(where: { $0 is TelegramMediaFile }), let file = media[index] as? TelegramMediaFile, let edit = self.trackEdits[file.fileId.id] else {
+            return message
+        }
+        media[index] = musicFile(file, title: edit.title, artist: edit.artist, cover: edit.cover)
+        return message.withUpdatedMedia(media)
+    }
+
+    func setEdit(_ edit: MusicTrackEdit, for track: MusicTrack) {
+        guard let fileId = track.file?.fileId.id else {
+            return
+        }
+        self.trackEdits[fileId] = edit
+        self.storeTrackEdits()
+        self.notifyUpdated()
+    }
+
+    private func storeTrackEdits() {
+        guard self.didLoadTrackEdits else {
+            return
+        }
+        let edits = self.trackEdits.map { fileId, edit in
+            return MusicStoredTrackEdits.Edit(fileId: fileId, title: edit.title, artist: edit.artist, cover: edit.cover.flatMap { cover -> MusicStoredPlaylists.Cover? in
+                guard let resource = cover.resource as? LocalFileMediaResource else {
+                    return nil
+                }
+                return MusicStoredPlaylists.Cover(fileId: resource.fileId, width: cover.dimensions.width, height: cover.dimensions.height)
+            })
+        }
+        let _ = self.context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.trackEdits.buffer, item: MusicStoredTrackEdits(edits: edits)).startStandalone()
     }
 
     var favoriteCount: Int {
@@ -279,6 +351,30 @@ final class MusicLibrary {
             }
             self.favoriteFileIds.formUnion(favorites?.get(MusicFileIdList.self)?.fileIds ?? [])
             self.removedFileIds.formUnion(removed?.get(MusicFileIdList.self)?.fileIds ?? [])
+            self.notifyUpdated()
+        }))
+
+        self.trackEditsDisposable.set((context.engine.data.get(
+            TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.trackEdits.buffer)
+        )
+        |> deliverOnMainQueue).start(next: { [weak self] entry in
+            guard let self else {
+                return
+            }
+            let editedMeanwhile = self.trackEdits
+            for edit in entry?.get(MusicStoredTrackEdits.self)?.edits ?? [] {
+                let cover = edit.cover.flatMap { cover in
+                    return TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: cover.width, height: cover.height), resource: LocalFileMediaResource(fileId: cover.fileId), progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
+                }
+                self.trackEdits[edit.fileId] = MusicTrackEdit(title: edit.title, artist: edit.artist, cover: cover)
+            }
+            for (fileId, edit) in editedMeanwhile {
+                self.trackEdits[fileId] = edit
+            }
+            self.didLoadTrackEdits = true
+            if !editedMeanwhile.isEmpty {
+                self.storeTrackEdits()
+            }
             self.notifyUpdated()
         }))
 
@@ -398,6 +494,7 @@ final class MusicLibrary {
         self.uploadDisposable.dispose()
         self.fileListsDisposable.dispose()
         self.playlistsDisposable.dispose()
+        self.trackEditsDisposable.dispose()
     }
 
     // MARK: Playlists
@@ -607,17 +704,12 @@ final class MusicLibrary {
         return tracks.sorted { sorting.ascending ? isOrdered($0, $1) : isOrdered($1, $0) }
     }
 
-    /// Uploads an audio file and saves it to the profile, as the music player's Add does.
-    func addTrack(url: URL, completion: @escaping (Bool) -> Void) {
-        let context = self.context
-        self.uploadDisposable.set((iCloudFileDescription(url)
-        |> deliverOnMainQueue).start(next: { [weak self] item in
-            guard let self else {
-                return
-            }
+    /// Reads a picked audio file into a local file: its tags and artwork prefill the new track screen.
+    func prepareTrack(url: URL) -> Signal<TelegramMediaFile?, NoError> {
+        return iCloudFileDescription(url)
+        |> map { item -> TelegramMediaFile? in
             guard let item else {
-                completion(false)
-                return
+                return nil
             }
             let mimeType = guessMimeTypeByFileExtension((item.fileName as NSString).pathExtension)
             var previewRepresentations: [TelegramMediaImageRepresentation] = []
@@ -628,33 +720,43 @@ final class MusicLibrary {
             if let audioMetadata = item.audioMetadata {
                 attributes.append(.Audio(isVoice: false, duration: audioMetadata.duration, title: audioMetadata.title, performer: audioMetadata.performer, waveform: nil))
             }
-            let file = TelegramMediaFile(fileId: EngineMedia.Id(namespace: Namespaces.Media.LocalFile, id: Int64.random(in: Int64.min ... Int64.max)), partialReference: nil, resource: ICloudFileResource(urlData: item.urlData, thumbnail: false), previewRepresentations: previewRepresentations, videoThumbnails: [], immediateThumbnailData: nil, mimeType: mimeType, size: Int64(item.fileSize), attributes: attributes, alternativeRepresentations: [])
+            return TelegramMediaFile(fileId: EngineMedia.Id(namespace: Namespaces.Media.LocalFile, id: Int64.random(in: Int64.min ... Int64.max)), partialReference: nil, resource: ICloudFileResource(urlData: item.urlData, thumbnail: false), previewRepresentations: previewRepresentations, videoThumbnails: [], immediateThumbnailData: nil, mimeType: mimeType, size: Int64(item.fileSize), attributes: attributes, alternativeRepresentations: [])
+        }
+        |> deliverOnMainQueue
+    }
 
-            self.uploadDisposable.set((standaloneUploadedFile(
-                postbox: context.account.postbox,
-                network: context.account.network,
-                peerId: context.account.peerId,
-                text: "",
-                source: .resource(.media(media: .standalone(media: file), resource: file.resource)),
-                thumbnailData: file.immediateThumbnailData,
-                mimeType: file.mimeType,
-                attributes: file.attributes,
-                hintFileIsLarge: false
-            )
-            |> deliverOnMainQueue).start(next: { [weak self] value in
-                guard let self, case let .result(result) = value, case let .media(resultMedia) = result, let resultFile = resultMedia.media as? TelegramMediaFile else {
-                    return
-                }
-                context.engine.resources.moveResourceData(from: EngineMediaResource.Id(file.resource.id), to: EngineMediaResource.Id(resultFile.resource.id), synchronous: true)
-                self.uploadDisposable.set((context.engine.peers.addSavedMusic(file: .standalone(media: resultFile))
-                |> deliverOnMainQueue).start(error: { _ in
-                    completion(false)
-                }, completed: {
-                    completion(true)
-                }))
-            }, error: { _ in
+    /// Uploads a prepared audio file with the title, artist and cover from the new track screen and saves it to the profile,
+    /// as the music player's Add does. A picked cover goes up as the file's thumbnail.
+    func addTrack(file preparedFile: TelegramMediaFile, title: String, artist: String, coverData: Data?, completion: @escaping (Bool) -> Void) {
+        let context = self.context
+        var file = musicFile(preparedFile, title: title, artist: artist, cover: nil)
+        if coverData != nil {
+            file = file.withUpdatedPreviewRepresentations([])
+        }
+        self.uploadDisposable.set((standaloneUploadedFile(
+            postbox: context.account.postbox,
+            network: context.account.network,
+            peerId: context.account.peerId,
+            text: "",
+            source: .resource(.media(media: .standalone(media: file), resource: file.resource)),
+            thumbnailData: coverData ?? file.immediateThumbnailData,
+            mimeType: file.mimeType,
+            attributes: file.attributes,
+            hintFileIsLarge: false
+        )
+        |> deliverOnMainQueue).start(next: { [weak self] value in
+            guard let self, case let .result(result) = value, case let .media(resultMedia) = result, let resultFile = resultMedia.media as? TelegramMediaFile else {
+                return
+            }
+            context.engine.resources.moveResourceData(from: EngineMediaResource.Id(file.resource.id), to: EngineMediaResource.Id(resultFile.resource.id), synchronous: true)
+            self.uploadDisposable.set((context.engine.peers.addSavedMusic(file: .standalone(media: resultFile))
+            |> deliverOnMainQueue).start(error: { _ in
                 completion(false)
+            }, completed: {
+                completion(true)
             }))
+        }, error: { _ in
+            completion(false)
         }))
     }
 
@@ -707,7 +809,7 @@ final class MusicLibrary {
             guard let fileId = musicFileId(message), !self.removedFileIds.contains(fileId.id), fileIds.insert(fileId).inserted else {
                 continue
             }
-            tracks.append(MusicTrack(message: message, isSaved: false))
+            tracks.append(MusicTrack(message: self.applyingEdit(message), isSaved: false))
         }
         return tracks
     }
@@ -716,6 +818,23 @@ final class MusicLibrary {
         self.resolvePlaylistTracks()
         self.updated.putNext(Void())
     }
+}
+
+/// The file with its audio title and performer replaced, and its cover when one is given.
+func musicFile(_ file: TelegramMediaFile, title: String, artist: String, cover: TelegramMediaImageRepresentation?) -> TelegramMediaFile {
+    var attributes = file.attributes
+    let title: String? = title.isEmpty ? nil : title
+    let performer: String? = artist.isEmpty ? nil : artist
+    if let index = attributes.firstIndex(where: { if case .Audio = $0 { return true } else { return false } }), case let .Audio(isVoice, duration, _, _, waveform) = attributes[index] {
+        attributes[index] = .Audio(isVoice: isVoice, duration: duration, title: title, performer: performer, waveform: waveform)
+    } else {
+        attributes.append(.Audio(isVoice: false, duration: 0, title: title, performer: performer, waveform: nil))
+    }
+    var result = file.withUpdatedAttributes(attributes)
+    if let cover {
+        result = result.withUpdatedPreviewRepresentations([cover])
+    }
+    return result
 }
 
 private func musicFileId(_ message: EngineRawMessage) -> EngineMedia.Id? {

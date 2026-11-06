@@ -460,6 +460,8 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
         case favorite
         case search
         case addTracks
+        /// The track picker's Add: every track of the playlist.
+        case addAll
     }
 
     static let height: CGFloat = 54.0
@@ -469,6 +471,8 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
     let isFavorite: Bool
     let playTitle: String
     let addTracksTitle: String
+    /// Set on a playlist opened inside the track picker: Add (all its tracks) and Search, two equal buttons (Figma Playlists / Add Track).
+    let pickerTitles: (add: String, search: String)?
     let topInset: CGFloat
     let bottomInset: CGFloat
     let sectionId: ItemListSectionId
@@ -476,12 +480,13 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
 
     let selectable: Bool = false
 
-    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, playTitle: String, addTracksTitle: String, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
+    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, playTitle: String, addTracksTitle: String, pickerTitles: (add: String, search: String)? = nil, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
         self.theme = theme
         self.isEmpty = isEmpty
         self.isFavorite = isFavorite
         self.playTitle = playTitle
         self.addTracksTitle = addTracksTitle
+        self.pickerTitles = pickerTitles
         self.topInset = topInset
         self.bottomInset = bottomInset
         self.sectionId = sectionId
@@ -557,6 +562,22 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
         }
     }
 
+    /// Add and Search at the same 17 pt semibold title and 24 pt glyph as every other button of the section.
+    private func layoutPickerButtons(item: MusicPlaylistActionsItem, titles: (add: String, search: String), leftX: CGFloat, rightX: CGFloat, spacing: CGFloat, height: CGFloat) {
+        let theme = item.theme
+        let width = floor((rightX - leftX - spacing) / 2.0)
+        let accent = theme.list.itemCheckColors.fillColor
+        let accentForeground = theme.list.itemCheckColors.foregroundColor
+        let accentBackground = ButtonComponent.Background(style: .actualGlass, color: accent, foreground: accentForeground, pressedColor: accent, cornerRadius: height * 0.5)
+        let glass = theme.overallDarkAppearance ? UIColor(white: 0.0, alpha: 0.01) : UIColor(white: 1.0, alpha: 0.01)
+        let foreground = theme.list.itemPrimaryTextColor
+        let glassBackground = ButtonComponent.Background(style: .actualGlass, color: glass, foreground: foreground, pressedColor: glass, cornerRadius: height * 0.5)
+        self.updateButton(self.mainButton, background: accentBackground, content: MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Add", iconSize: CGSize(width: 24.0, height: 24.0), title: titles.add, color: accentForeground), frame: CGRect(x: leftX, y: 0.0, width: width, height: height), action: .addAll)
+        self.updateButton(self.searchButton, background: glassBackground, content: MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Search", iconSize: CGSize(width: 24.0, height: 24.0), title: titles.search, color: foreground), frame: CGRect(x: leftX + width + spacing, y: 0.0, width: width, height: height), action: .search)
+        self.shuffleButton.view?.isHidden = true
+        self.favoriteButton.view?.isHidden = true
+    }
+
     func asyncLayout() -> (_ item: MusicPlaylistActionsItem, _ params: ListViewItemLayoutParams) -> (ListViewItemNodeLayout, () -> Void) {
         return { [weak self] item, params in
             let height = MusicPlaylistActionsItem.height
@@ -571,6 +592,10 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 let spacing: CGFloat = 8.0
                 let leftX = params.leftInset + sideInset
                 let rightX = params.width - params.rightInset - sideInset
+                if let pickerTitles = item.pickerTitles {
+                    self.layoutPickerButtons(item: item, titles: pickerTitles, leftX: leftX, rightX: rightX, spacing: spacing, height: height)
+                    return
+                }
                 let roundCount: CGFloat = item.isEmpty ? 1.0 : 3.0
                 let mainWidth = rightX - leftX - roundCount * (height + spacing)
 
@@ -586,7 +611,7 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 if item.isEmpty {
                     mainContent = MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Add", iconSize: CGSize(width: 24.0, height: 24.0), title: item.addTracksTitle, color: accentForeground)
                 } else {
-                    mainContent = MusicPlaylistActionsItemNode.titleContent(icon: "GlobalMusicPlayer/Play", iconSize: CGSize(width: 23.0, height: 23.0), title: item.playTitle, color: accentForeground)
+                    mainContent = MusicPlaylistActionsItemNode.titleContent(icon: "GlobalMusicPlayer/Play", iconSize: CGSize(width: 24.0, height: 24.0), title: item.playTitle, color: accentForeground)
                 }
                 self.updateButton(self.mainButton, background: accentBackground, content: mainContent, frame: CGRect(x: leftX, y: 0.0, width: mainWidth, height: height), action: item.isEmpty ? .addTracks : .play)
 

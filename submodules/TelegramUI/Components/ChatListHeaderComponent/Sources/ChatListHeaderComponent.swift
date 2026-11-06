@@ -294,7 +294,10 @@ public final class ChatListHeaderComponent: Component {
         /// list's root sets `chatListTitle`, a forum sets `titleComponent`.
         private func navigationBarContent(_ content: Content, isSecondary: Bool, component: ChatListHeaderComponent) -> NavigationBarComponent.Content {
             let title: NavigationBarComponent.Title
-            if !isSecondary && component.storySubscriptions != nil {
+            if let titleComponent = content.titleComponent, content.chatListTitle == nil {
+                // A custom title (a forum's, a title with a subtitle) is the bar's own even while the story list is shown.
+                title = .component(titleComponent)
+            } else if !isSecondary && component.storySubscriptions != nil {
                 title = .text("")
             } else if let chatListTitle = content.chatListTitle {
                 title = .custom(AnyComponent(ChatListTitleComponent(
@@ -399,7 +402,7 @@ public final class ChatListHeaderComponent: Component {
                                 primaryTitlePeerStatus = .emoji(status)
                             }
                         }
-                    } else {
+                    } else if primaryContent.titleComponent == nil {
                         primaryTitle = primaryContent.title
                     }
                 }

@@ -31,7 +31,8 @@ enum MusicSection: Equatable {
     case hub
     case songs(artist: String?)
     case artists
-    case playlists
+    /// `favoritesOnly`: the playlists marked as favorites, opened from the Favorites list.
+    case playlists(favoritesOnly: Bool)
     case favorites
     case playlist(Int)
 }
@@ -123,6 +124,10 @@ public final class MusicScreen: ViewController {
                 self.tabBarItem.animationScale = 30.0 / 48.0
                 self.tabBarItem.animationOffset = CGPoint(x: 0.0, y: (48.0 - 30.0) * 0.5)
             }
+        }
+        if picker != nil {
+            // The sheet is the iOS 27 one: 38 pt corners.
+            self._hasGlassStyle = true
         }
         self.updateThemeAndStrings()
 
@@ -385,7 +390,7 @@ public final class MusicScreen: ViewController {
                 guard let self, let library else {
                     return
                 }
-                self.openFromMenu(section: .playlists, library: library)
+                self.openFromMenu(section: .playlists(favoritesOnly: false), library: library)
             }),
             .separator,
             action(musicString(strings, ru: "Воспроизвести", en: "Play"), "Chat/Context Menu/Play", { [weak self, weak library] in
@@ -544,33 +549,52 @@ public final class MusicScreen: ViewController {
         self.present(actionSheet, in: .window(.root))
     }
 
+    /// Picks an audio file and opens the new track screen with its tags; Done uploads it to the profile.
     func addTrack(library: MusicLibrary) {
         let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
         self.present(legacyICloudFilePicker(theme: presentationData.theme, mode: .default, documentTypes: ["public.mp3", "public.mpeg-4-audio", "public.aac-audio", "org.xiph.flac"], completion: { [weak self, weak library] urls in
-            guard let url = urls.first else {
+            guard let url = urls.first, let library else {
                 return
             }
-            library?.addTrack(url: url, completion: { [weak self] success in
-                guard let self else {
+            let _ = (library.prepareTrack(url: url)
+            |> take(1)).start(next: { [weak self, weak library] file in
+                guard let self, let library else {
                     return
                 }
-                let strings = presentationData.strings
-                self.present(UndoOverlayController(
-                    presentationData: presentationData,
-                    content: .universalImage(
-                        image: generateTintedImage(image: UIImage(bundleImageName: "Peer Info/SavedMusic"), color: .white)!,
-                        size: nil,
-                        title: nil,
-                        text: success ? strings.MediaPlayer_SavedMusic_AddedToProfile : strings.Login_UnknownError,
-                        customUndoText: nil,
-                        timeout: 3.0
-                    ),
-                    action: { _ in
-                        return true
-                    }
-                ), in: .current)
+                guard let file else {
+                    self.presentAddedToast(success: false)
+                    return
+                }
+                self.push(musicTrackEditScreen(context: self.context, library: library, mode: .new(file), completion: { [weak self] success in
+                    self?.presentAddedToast(success: success)
+                }))
             })
         }), in: .window(.root))
+    }
+
+    /// Opens the track screen for a track of the library; the change is kept on this device.
+    func editTrack(_ track: MusicTrack, library: MusicLibrary) {
+        self.push(musicTrackEditScreen(context: self.context, library: library, mode: .edit(track), completion: { _ in
+        }))
+    }
+
+    private func presentAddedToast(success: Bool) {
+        let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
+        let strings = presentationData.strings
+        self.present(UndoOverlayController(
+            presentationData: presentationData,
+            content: .universalImage(
+                image: generateTintedImage(image: UIImage(bundleImageName: "Peer Info/SavedMusic"), color: .white)!,
+                size: nil,
+                title: nil,
+                text: success ? strings.MediaPlayer_SavedMusic_AddedToProfile : strings.Login_UnknownError,
+                customUndoText: nil,
+                timeout: 3.0
+            ),
+            action: { _ in
+                return true
+            }
+        ), in: .current)
     }
 
     private func currentLibrary() -> MusicLibrary {

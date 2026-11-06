@@ -35,7 +35,7 @@ enum MusicResources {
             guard let source = generateTintedImage(image: UIImage(bundleImageName: "Call/StarHighlighted"), color: theme.list.disclosureArrowColor) else {
                 return nil
             }
-            let size = CGSize(width: 18.0, height: 18.0)
+            let size = CGSize(width: 14.0, height: 14.0)
             return generateImage(size, rotatedContext: { size, context in
                 context.clear(CGRect(origin: CGPoint(), size: size))
                 UIGraphicsPushContext(context)
@@ -95,10 +95,6 @@ func musicTrackCountString(_ strings: PresentationStrings, _ count: Int) -> Stri
 
 /// The second line of a playlist row: its description, or how many tracks it holds.
 func musicPlaylistSubtitle(_ strings: PresentationStrings, playlist: MusicPlaylist, library: MusicLibrary) -> String {
-    let description = playlist.description.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !description.isEmpty {
-        return description
-    }
     return musicTrackCountString(strings, library.tracks(of: playlist).count)
 }
 

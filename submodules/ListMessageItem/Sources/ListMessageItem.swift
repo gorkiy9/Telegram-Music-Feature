@@ -113,6 +113,12 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let blockTopInset: CGFloat
     let displayBackground: Bool
     let canReorder: Bool
+    /// The opaque fill of a row that can be dragged, when it is not the card colour: a list on the plain grouped background.
+    let reorderBackgroundColor: UIColor?
+    /// Moves the reorder control this far into the right inset, for rows whose background runs past the list's content edge.
+    let reorderControlOutset: CGFloat
+    /// Added to the left inset only: a list whose rows start at the screen edge while its right side keeps the inset for the grabber.
+    let additionalLeftInset: CGFloat
     let leftRevealOptions: [ListMessageItemRevealOption]
     let rightRevealOptions: [ListMessageItemRevealOption]
     /// A static glyph at the end of the row, such as a favorite mark.
@@ -165,6 +171,9 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         blockTopInset: CGFloat = 0.0,
         displayBackground: Bool = false,
         canReorder: Bool = false,
+        reorderBackgroundColor: UIColor? = nil,
+        reorderControlOutset: CGFloat = 0.0,
+        additionalLeftInset: CGFloat = 0.0,
         richMessageQueueId: EngineMessage.Id? = nil,
         leftRevealOptions: [ListMessageItemRevealOption] = [],
         rightRevealOptions: [ListMessageItemRevealOption] = [],
@@ -204,6 +213,9 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.blockTopInset = blockTopInset
         self.displayBackground = displayBackground
         self.canReorder = canReorder
+        self.reorderBackgroundColor = reorderBackgroundColor
+        self.reorderControlOutset = reorderControlOutset
+        self.additionalLeftInset = additionalLeftInset
         self.leftRevealOptions = leftRevealOptions
         self.rightRevealOptions = rightRevealOptions
         self.trailingIcon = trailingIcon

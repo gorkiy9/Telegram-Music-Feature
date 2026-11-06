@@ -360,6 +360,8 @@ public final class ListMessageFileItemNode: ListMessageNode {
     private var editControlNode: HighlightableButtonNode?
     private var editControlAction: (() -> Void)?
     private var trailingIconNode: ASImageNode?
+    /// How far the trailing icon moves left in the preview, besides undoing the content offset: the card's 16 pt inset.
+    private static let trailingIconExtractedShift: CGFloat = 16.0
     /// Tints a selected cover row while the list selects tracks.
     private var selectionTintNode: ASDisplayNode?
     
@@ -534,6 +536,9 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 if case .blocks = item.style {
                     // The card's own glass corner radius (26), so the preview matches the card it lifts out of.
                     diameter = 52.0
+                } else if item.displaysAudioCover {
+                    // A cover row is as tall as a large peer row, so it lifts out with the same radius (`ContactsPeerItem`, isLarge).
+                    diameter = 52.0
                 } else {
                     diameter = 28.0
                 }
@@ -546,6 +551,15 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? strongSelf.extractedContentOffset : 0.0, y: 0.0))
+            if let trailingIconNode = strongSelf.trailingIconNode {
+                let shift: CGFloat
+                if isExtracted, case .plain = item.style {
+                    shift = -(strongSelf.extractedContentOffset + ListMessageFileItemNode.trailingIconExtractedShift)
+                } else {
+                    shift = 0.0
+                }
+                transition.updateTransform(node: trailingIconNode, transform: CGAffineTransformMakeTranslation(shift, 0.0))
+            }
             transition.updateAlpha(node: strongSelf.extractedBackgroundImageNode, alpha: isExtracted ? 1.0 : 0.0, completion: { _ in
                 if !isExtracted {
                     self?.extractedBackgroundImageNode.image = nil
@@ -644,7 +658,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
         let selectionNodeLayout = ItemListSelectableControlNode.asyncLayout(self.selectionNode)
         
         return { [weak self] item, listParams, mergedTop, mergedBottom, dateHeaderAtBottom in
-            let params = ListViewItemLayoutParams(width: listParams.width, leftInset: listParams.leftInset + item.additionalSideInset, rightInset: listParams.rightInset + item.additionalSideInset, availableHeight: listParams.availableHeight, isStandalone: listParams.isStandalone)
+            let params = ListViewItemLayoutParams(width: listParams.width, leftInset: listParams.leftInset + item.additionalSideInset + item.additionalLeftInset, rightInset: listParams.rightInset + item.additionalSideInset, availableHeight: listParams.availableHeight, isStandalone: listParams.isStandalone)
             var updatedTheme: PresentationTheme?
             
             if currentItem?.presentationData.theme.theme !== item.presentationData.theme.theme {
@@ -1070,15 +1084,24 @@ public final class ListMessageFileItemNode: ListMessageNode {
             if item.canReorder {
                 let sizeAndApply = reorderControlLayout(item.presentationData.theme.theme)
                 reorderControlSizeAndApply = sizeAndApply
-                reorderInset = sizeAndApply.0
+                reorderInset = max(0.0, sizeAndApply.0 - item.reorderControlOutset)
             }
             
             var contentRightInset = rightInset + rightOffset + reorderInset
             if let trailingIcon = item.trailingIcon {
-                contentRightInset += trailingIcon.size.width + 8.0
-            }
-            if !item.isGlobalSearchResult {
+                // The icon's own 12 pt margin and an 8 pt gap before the text; a plain row also keeps room for the preview,
+                // where the text moves right by the content offset and the icon left by the card's inset (see `trailingIconExtractedShift`).
+                contentRightInset += trailingIcon.size.width + 12.0 + 8.0
+                if case .plain = item.style {
+                    contentRightInset += 12.0 + ListMessageFileItemNode.trailingIconExtractedShift
+                }
+            } else if !item.isGlobalSearchResult {
                 contentRightInset += 16.0
+            }
+            if item.displaysAudioCover, case .plain = item.style {
+                // In the menu preview the text moves right by the content offset (12) inside a card inset by 16, and keeps
+                // the card's 12 pt margin, so a long title still ends inside the card.
+                contentRightInset = max(contentRightInset, rightInset + rightOffset + reorderInset + 12.0 + 16.0 + 12.0)
             }
             
             let timestamp = Int32(CFAbsoluteTimeGetCurrent() + NSTimeIntervalSince1970)
@@ -1156,7 +1179,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                 insets.top += header.height
             }
 
-            let separatorRightInset: CGFloat = item.systemStyle == .glass ? 16.0 : 0.0
+            let separatorRightInset: CGFloat = item.systemStyle == .glass ? (item.canReorder ? max(0.0, 16.0 - params.rightInset) : 16.0) : 0.0
             
             var verticalInset: CGFloat = 0.0
             if case .glass = item.systemStyle {
@@ -1239,7 +1262,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
                                 strongSelf.backgroundNode = backgroundNode
                                 strongSelf.insertSubnode(backgroundNode, at: 0)
                             }
-                            backgroundNode.backgroundColor = item.canReorder ? item.presentationData.theme.theme.list.itemModalBlocksBackgroundColor : item.presentationData.theme.theme.list.itemBlocksBackgroundColor
+                            backgroundNode.backgroundColor = item.canReorder ? (item.reorderBackgroundColor ?? item.presentationData.theme.theme.list.itemModalBlocksBackgroundColor) : item.presentationData.theme.theme.list.itemBlocksBackgroundColor
                         }
                         
                         strongSelf.separatorNode.backgroundColor = item.presentationData.theme.theme.list.itemPlainSeparatorColor
@@ -1316,14 +1339,16 @@ public final class ListMessageFileItemNode: ListMessageNode {
                             strongSelf.offsetContainerNode.addSubnode(trailingIconNode)
                         }
                         trailingIconNode.image = trailingIcon
-                        transition.updateFrame(node: trailingIconNode, frame: CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderInset - 12.0 - trailingIcon.size.width, y: floor((nodeLayout.contentSize.height - trailingIcon.size.height) / 2.0)), size: trailingIcon.size))
+                        let trailingIconFrame = CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderInset - 12.0 - trailingIcon.size.width, y: floor((nodeLayout.contentSize.height - trailingIcon.size.height) / 2.0)), size: trailingIcon.size)
+                        trailingIconNode.bounds = CGRect(origin: CGPoint(), size: trailingIconFrame.size)
+                        transition.updatePosition(node: trailingIconNode, position: trailingIconFrame.center)
                     } else if let trailingIconNode = strongSelf.trailingIconNode {
                         strongSelf.trailingIconNode = nil
                         trailingIconNode.removeFromSupernode()
                     }
                     
                     if let reorderControlSizeAndApply = reorderControlSizeAndApply {
-                        let reorderControlFrame = CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderControlSizeAndApply.0, y: 0.0), size: CGSize(width: reorderControlSizeAndApply.0, height: nodeLayout.contentSize.height))
+                        let reorderControlFrame = CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderControlSizeAndApply.0 + item.reorderControlOutset, y: 0.0), size: CGSize(width: reorderControlSizeAndApply.0, height: nodeLayout.contentSize.height))
                         if strongSelf.reorderControlNode == nil {
                             let reorderControlNode = reorderControlSizeAndApply.1(nodeLayout.contentSize.height, false, .immediate)
                             strongSelf.reorderControlNode = reorderControlNode

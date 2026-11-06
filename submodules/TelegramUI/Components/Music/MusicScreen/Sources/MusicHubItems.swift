@@ -7,6 +7,7 @@ import SwiftSignalKit
 import TelegramPresentationData
 import ItemListUI
 import ManagedAnimationNode
+import GradientBackground
 import GlassBackgroundComponent
 import ButtonComponent
 import BundleIconComponent
@@ -59,11 +60,20 @@ private struct MusicHubTilePalette {
     }
 }
 
-private final class MusicHubTileView: UIView {
+private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
     static let cornerRadius: CGFloat = 26.0
 
-    private let gradientLayer = CAGradientLayer()
-    private let glowLayer = SimpleLayer()
+    /// Everything the press tilts; the tile itself keeps the frame its parent gives it.
+    private let pressView = UIView()
+    private let gradientNode = GradientBackgroundNode(adjustSaturation: false)
+    /// Light on the rim: a radial gradient seen only through a stroke of the outline.
+    private let edgeLightLayer = CAGradientLayer()
+    private let edgeLightMask = CAShapeLayer()
+    private var isPressed = false
+    private var isIconPlaying = false
+    private var isFlowing = false
+    /// Bumped whenever flowing stops, so a step scheduled before cannot start a second chain.
+    private var flowGeneration = 0
     private let glassView = GlassBackgroundView()
     private let titleNode = ImmediateTextNode()
     private var animationNode: SimpleAnimationNode?
@@ -71,64 +81,169 @@ private final class MusicHubTileView: UIView {
     private var tile: MusicHubTile?
     private var isDark: Bool?
     private var phase: Double = 0.0
+    /// Index of the tile in the grid: picks its own step length and the corner each colour starts in.
+    private var flowIndex: Int = 0
     var action: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
-        self.clipsToBounds = true
-        self.layer.cornerRadius = MusicHubTileView.cornerRadius
-        self.layer.cornerCurve = .continuous
+        self.pressView.isUserInteractionEnabled = false
+        self.pressView.clipsToBounds = true
+        self.pressView.layer.cornerRadius = MusicHubTileView.cornerRadius
+        self.pressView.layer.cornerCurve = .continuous
+        self.addSubview(self.pressView)
 
-        self.gradientLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-        self.gradientLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-        self.layer.addSublayer(self.gradientLayer)
-        self.layer.addSublayer(self.glowLayer)
+        self.gradientNode.isUserInteractionEnabled = false
+        self.pressView.addSubview(self.gradientNode.view)
 
-        self.addSubview(self.glassView)
+        self.pressView.addSubview(self.glassView)
         self.glassView.contentView.addSubview(self.titleNode.view)
         self.titleNode.isUserInteractionEnabled = false
 
-        self.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.tapped)))
+        self.edgeLightLayer.type = .radial
+        self.edgeLightLayer.colors = [UIColor(white: 1.0, alpha: 0.95).cgColor, UIColor(white: 1.0, alpha: 0.35).cgColor, UIColor(white: 1.0, alpha: 0.0).cgColor]
+        self.edgeLightLayer.locations = [0.0, 0.45, 1.0]
+        self.edgeLightLayer.opacity = 0.0
+        self.edgeLightLayer.compositingFilter = "overlayBlendMode"
+        self.edgeLightMask.fillColor = nil
+        self.edgeLightMask.strokeColor = UIColor.white.cgColor
+        self.edgeLightMask.lineWidth = 3.0
+        self.edgeLightLayer.mask = self.edgeLightMask
+        self.pressView.layer.addSublayer(self.edgeLightLayer)
+
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(self.pressGesture(_:)))
+        press.minimumPressDuration = 0.0
+        press.allowableMovement = .greatestFiniteMagnitude
+        press.delegate = self
+        self.addGestureRecognizer(press)
+    }
+
+    /// Recognizes on touch down and keeps the touch, so the list's pan cannot start while the tile is held.
+    @objc private func pressGesture(_ recognizer: UILongPressGestureRecognizer) {
+        let point = recognizer.location(in: self)
+        switch recognizer.state {
+        case .began, .changed:
+            // Leaving the tile releases it; coming back presses it again.
+            self.setPressed(self.bounds.contains(point), at: point)
+        case .ended:
+            let wasPressed = self.isPressed
+            self.setPressed(false, at: nil)
+            if wasPressed, self.bounds.contains(point) {
+                self.tapped()
+            }
+        default:
+            self.setPressed(false, at: nil)
+        }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return false
+    }
+
+    /// Any pan above the tile (the list's scroll) waits for the press, which only ends when the finger lifts.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return otherGestureRecognizer is UIPanGestureRecognizer
+    }
+
+    /// Pressing sinks the tile: it shrinks and tilts away under the finger, and the rim lights up on the side that rises, following the finger.
+    private func setPressed(_ pressed: Bool, at point: CGPoint?) {
+        let size = self.bounds.size
+        guard size.width > 0.0 else {
+            return
+        }
+        let wasPressed = self.isPressed
+        self.isPressed = pressed
+
+        var transform = CATransform3DIdentity
+        var lightOpacity: Float = 0.0
+        if pressed, let point {
+            let dx = max(-1.0, min(1.0, (point.x - size.width / 2.0) / (size.width / 2.0)))
+            let dy = max(-1.0, min(1.0, (point.y - size.height / 2.0) / (size.height / 2.0)))
+            let maxAngle: CGFloat = 10.0 * .pi / 180.0
+            transform.m34 = -1.0 / 500.0
+            transform = CATransform3DRotate(transform, -dy * maxAngle, 1.0, 0.0, 0.0)
+            transform = CATransform3DRotate(transform, dx * maxAngle, 0.0, 1.0, 0.0)
+            transform = CATransform3DScale(transform, 0.95, 0.95, 1.0)
+            lightOpacity = 1.0
+
+            // The raised side faces the light: the opposite of the finger, on the rim.
+            let light = CGPoint(x: 0.5 - dx * 0.5, y: 0.5 - dy * 0.5)
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(wasPressed ? 0.12 : 0.0)
+            self.edgeLightLayer.startPoint = light
+            self.edgeLightLayer.endPoint = CGPoint(x: light.x + 0.75, y: light.y + 0.75 * size.width / size.height)
+            CATransaction.commit()
+        }
+
+        let transition: ContainedViewLayoutTransition = pressed && wasPressed ? .animated(duration: 0.12, curve: .easeInOut) : .animated(duration: pressed ? 0.2 : 0.45, curve: .spring)
+        transition.updateTransform(layer: self.pressView.layer, transform: transform, beginWithCurrentState: true)
+        transition.updateAlpha(layer: self.edgeLightLayer, alpha: CGFloat(lightOpacity))
+        if pressed && !wasPressed {
+            HapticFeedback().impact(.light)
+            // Played on touch down: the section opens on release and pushes the hub away before a later start could be seen.
+            self.playIcon()
+        }
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    @objc private func tapped() {
-        self.action?()
-    }
-
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if self.window != nil {
-            self.updateAnimations()
+            self.startFlowing()
+        } else {
+            self.isFlowing = false
+            self.flowGeneration += 1
         }
     }
 
-    func update(tile: MusicHubTile, phase: Double, theme: PresentationTheme, size: CGSize) {
+    private func playIcon() {
+        guard let animationNode = self.animationNode, !self.isIconPlaying else {
+            return
+        }
+        self.isIconPlaying = true
+        animationNode.reset(immediately: true)
+        animationNode.play()
+        // Once per press: sliding back onto the tile must not restart it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.isIconPlaying = false
+        }
+    }
+
+    private func tapped() {
+        self.action?()
+    }
+
+    func update(tile: MusicHubTile, index: Int, phase: Double, theme: PresentationTheme, size: CGSize) {
         let isDark = theme.overallDarkAppearance
         let palette = MusicHubTilePalette.palette(kind: tile.kind, isDark: isDark)
         let previousTile = self.tile
         let previousIsDark = self.isDark
         self.tile = tile
         self.phase = phase
+        self.flowIndex = index
 
         if previousTile?.kind != tile.kind || self.isDark != isDark {
             self.isDark = isDark
-            self.gradientLayer.colors = [palette.start.cgColor, palette.end.cgColor]
-            self.glowLayer.contents = MusicHubTileView.glowImage(color: palette.glow)?.cgImage
-            self.glowLayer.compositingFilter = isDark ? "screenBlendMode" : nil
-            self.glowLayer.removeAllAnimations()
-            self.gradientLayer.removeAllAnimations()
+            // Four points of the client's wallpaper gradient, from the tile's palette.
+            // Rotated per tile, so no two tiles show the same picture at the same phase.
+            let colors = [palette.start, palette.glow, palette.end, palette.start.mixedWith(palette.glow, alpha: 0.5)]
+            let shift = index % colors.count
+            self.gradientNode.updateColors(colors: Array(colors[shift...] + colors[..<shift]))
         }
 
-        self.gradientLayer.frame = CGRect(origin: CGPoint(), size: size)
-        let glowSize = CGSize(width: size.width * 1.3, height: size.width * 1.3)
-        self.glowLayer.bounds = CGRect(origin: CGPoint(), size: glowSize)
-        if self.glowLayer.animation(forKey: "drift") == nil {
-            self.glowLayer.position = CGPoint(x: size.width * 0.4, y: size.height * 1.05)
+        self.pressView.bounds = CGRect(origin: CGPoint(), size: size)
+        self.pressView.center = CGPoint(x: size.width / 2.0, y: size.height / 2.0)
+        self.edgeLightLayer.frame = CGRect(origin: CGPoint(), size: size)
+        self.edgeLightMask.frame = CGRect(origin: CGPoint(), size: size)
+        self.edgeLightMask.path = UIBezierPath(roundedRect: CGRect(origin: CGPoint(), size: size).insetBy(dx: 0.75, dy: 0.75), cornerRadius: MusicHubTileView.cornerRadius - 0.75).cgPath
+
+        if self.gradientNode.frame.size != size {
+            self.gradientNode.frame = CGRect(origin: CGPoint(), size: size)
+            self.gradientNode.updateLayout(size: size, transition: .immediate, extendAnimation: false, backwards: false, completion: {})
         }
 
         self.glassView.frame = CGRect(origin: CGPoint(), size: size)
@@ -157,71 +272,34 @@ private final class MusicHubTileView: UIView {
         }
         animationNode.frame = CGRect(origin: CGPoint(x: 12.0, y: 12.0), size: animationSize)
 
-        self.updateAnimations()
+        self.startFlowing()
     }
 
-    /// The light drifts around the lower half and the gradient's axis sways, each tile on its own phase.
-    private func updateAnimations() {
-        let size = self.bounds.size
-        guard size.width > 0.0, self.window != nil else {
+    /// The wallpaper gradient steps through its eight phases one after another, so the colours flow under the glass without a pause. Each tile starts after its own delay.
+    private func startFlowing() {
+        guard !self.isFlowing, self.window != nil, self.bounds.width > 0.0 else {
             return
         }
-        let beginTime = CACurrentMediaTime() - self.phase
-
-        if self.glowLayer.animation(forKey: "drift") == nil {
-            let path = UIBezierPath(ovalIn: CGRect(x: size.width * 0.15, y: size.height * 0.55, width: size.width * 0.7, height: size.height * 0.55))
-            let drift = CAKeyframeAnimation(keyPath: "position")
-            drift.path = path.cgPath
-            drift.duration = 9.0
-            drift.calculationMode = .paced
-            drift.repeatCount = .infinity
-            drift.beginTime = beginTime
-            drift.isRemovedOnCompletion = false
-            self.glowLayer.add(drift, forKey: "drift")
-
-            let breathe = CABasicAnimation(keyPath: "transform.scale")
-            breathe.fromValue = 0.85
-            breathe.toValue = 1.15
-            breathe.duration = 4.0
-            breathe.autoreverses = true
-            breathe.repeatCount = .infinity
-            breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            breathe.beginTime = beginTime
-            breathe.isRemovedOnCompletion = false
-            self.glowLayer.add(breathe, forKey: "breathe")
-        }
-
-        if self.gradientLayer.animation(forKey: "sway") == nil {
-            let start = CABasicAnimation(keyPath: "startPoint")
-            start.fromValue = NSValue(cgPoint: CGPoint(x: 0.0, y: 0.0))
-            start.toValue = NSValue(cgPoint: CGPoint(x: 1.0, y: 0.0))
-            let end = CABasicAnimation(keyPath: "endPoint")
-            end.fromValue = NSValue(cgPoint: CGPoint(x: 1.0, y: 1.0))
-            end.toValue = NSValue(cgPoint: CGPoint(x: 0.0, y: 1.0))
-            let group = CAAnimationGroup()
-            group.animations = [start, end]
-            group.duration = 6.0
-            group.autoreverses = true
-            group.repeatCount = .infinity
-            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            group.beginTime = beginTime
-            group.isRemovedOnCompletion = false
-            self.gradientLayer.add(group, forKey: "sway")
+        self.isFlowing = true
+        self.flowGeneration += 1
+        let generation = self.flowGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + self.phase.truncatingRemainder(dividingBy: 3.0)) { [weak self] in
+            self?.flowStep(generation: generation)
         }
     }
 
-    /// The Figma ellipse is a 32 pt Gaussian blur of a flat fill; a radial falloff draws the same light without a filter.
-    private static func glowImage(color: UIColor) -> UIImage? {
-        return generateImage(CGSize(width: 128.0, height: 128.0), rotatedContext: { size, context in
-            context.clear(CGRect(origin: CGPoint(), size: size))
-            let colors = [color.withAlphaComponent(0.85).cgColor, color.withAlphaComponent(0.4).cgColor, color.withAlphaComponent(0.0).cgColor] as CFArray
-            var locations: [CGFloat] = [0.0, 0.45, 1.0]
-            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: &locations) else {
-                return
-            }
-            let center = CGPoint(x: size.width / 2.0, y: size.height / 2.0)
-            context.drawRadialGradient(gradient, startCenter: center, startRadius: 0.0, endCenter: center, endRadius: size.width / 2.0, options: [])
-        })
+    /// One phase every 3 s on a fixed clock, not on the animation's completion, which can fire at once and spin the gradient.
+    private func flowStep(generation: Int) {
+        guard self.isFlowing, generation == self.flowGeneration, self.window != nil else {
+            return
+        }
+        // Steps of different length per tile keep the tiles drifting apart instead of moving in step.
+        let stepDurations: [Double] = [3.0, 3.7, 2.6, 4.3]
+        let stepDuration = stepDurations[self.flowIndex % stepDurations.count]
+        self.gradientNode.animateEvent(transition: .animated(duration: stepDuration, curve: .linear), extendAnimation: false, backwards: false, completion: {})
+        DispatchQueue.main.asyncAfter(deadline: .now() + stepDuration) { [weak self] in
+            self?.flowStep(generation: generation)
+        }
     }
 }
 
@@ -234,16 +312,19 @@ final class MusicHubTilesItem: ListViewItem, ItemListItem {
     let tiles: [MusicHubTile]
     let sideInset: CGFloat
     let topInset: CGFloat
+    /// Space under the tiles, for lists that have no Play and Shuffle row to carry it (the track picker).
+    let bottomInset: CGFloat
     let sectionId: ItemListSectionId
     let action: (MusicHubTile.Kind) -> Void
 
     let selectable: Bool = false
 
-    init(theme: PresentationTheme, tiles: [MusicHubTile], sideInset: CGFloat, topInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (MusicHubTile.Kind) -> Void) {
+    init(theme: PresentationTheme, tiles: [MusicHubTile], sideInset: CGFloat, topInset: CGFloat, bottomInset: CGFloat = 0.0, sectionId: ItemListSectionId, action: @escaping (MusicHubTile.Kind) -> Void) {
         self.theme = theme
         self.tiles = tiles
         self.sideInset = sideInset
         self.topInset = topInset
+        self.bottomInset = bottomInset
         self.sectionId = sectionId
         self.action = action
     }
@@ -288,14 +369,16 @@ final class MusicHubTilesItemNode: ListViewItemNode {
         return { [weak self] item, params in
             let rows = CGFloat((item.tiles.count + 1) / 2)
             let height = rows * MusicHubTilesItem.tileHeight + max(0.0, rows - 1.0) * MusicHubTilesItem.spacing
-            let layout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: height), insets: UIEdgeInsets(top: item.topInset, left: 0.0, bottom: 0.0, right: 0.0))
+            let layout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: height), insets: UIEdgeInsets(top: item.topInset, left: 0.0, bottom: item.bottomInset, right: 0.0))
             return (layout, { [weak self] in
                 guard let strongSelf = self else {
                     return
                 }
                 strongSelf.item = item
                 let sideInset = params.leftInset + item.sideInset
-                let tileWidth = floor((params.width - sideInset - params.rightInset - item.sideInset - MusicHubTilesItem.spacing) / 2.0)
+                let fullWidth = params.width - sideInset - params.rightInset - item.sideInset
+                // A lone tile spans the whole row (Favorites); otherwise two columns.
+                let tileWidth = item.tiles.count == 1 ? fullWidth : floor((fullWidth - MusicHubTilesItem.spacing) / 2.0)
                 let tileSize = CGSize(width: tileWidth, height: MusicHubTilesItem.tileHeight)
                 var validKinds = Set<MusicHubTile.Kind>()
                 for (index, tile) in item.tiles.enumerated() {
@@ -315,7 +398,7 @@ final class MusicHubTilesItemNode: ListViewItemNode {
                     let column = CGFloat(index % 2)
                     let row = CGFloat(index / 2)
                     tileView.frame = CGRect(origin: CGPoint(x: sideInset + column * (tileWidth + MusicHubTilesItem.spacing), y: row * (MusicHubTilesItem.tileHeight + MusicHubTilesItem.spacing)), size: tileSize)
-                    tileView.update(tile: tile, phase: Double(index) * 2.3, theme: item.theme, size: tileSize)
+                    tileView.update(tile: tile, index: index, phase: Double(index) * 2.3, theme: item.theme, size: tileSize)
                 }
                 for (kind, view) in strongSelf.tileViews where !validKinds.contains(kind) {
                     view.removeFromSuperview()
@@ -398,8 +481,8 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
         super.init(layerBacked: false, rotated: false, seeThrough: false)
     }
 
-    /// Figma "Button - Liquid Glass - Text": 15 pt semibold title, a glyph about the title's cap height 8 pt before it.
-    static let titleFont = Font.semibold(15.0)
+    /// Figma "Button - Liquid Glass - Text": 17 pt semibold title with a 24 pt glyph (same metrics as every other button of the section).
+    static let titleFont = Font.semibold(17.0)
 
     private static func content(icon: String, iconSize: CGSize, title: String, color: UIColor, spacing: CGFloat) -> AnyComponentWithIdentity<Empty> {
         return AnyComponentWithIdentity(id: AnyHashable(title), component: AnyComponent(HStack([
@@ -429,7 +512,7 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
                     transition: .immediate,
                     component: AnyComponent(ButtonComponent(
                         background: ButtonComponent.Background(style: .actualGlass, color: accent, foreground: playForeground, pressedColor: accent, cornerRadius: buttonSize.height * 0.5),
-                        content: MusicPlaybackButtonsItemNode.content(icon: "GlobalMusicPlayer/Play", iconSize: CGSize(width: 23.0, height: 23.0), title: item.playTitle, color: playForeground, spacing: 3.0),
+                        content: MusicPlaybackButtonsItemNode.content(icon: "GlobalMusicPlayer/Play", iconSize: CGSize(width: 24.0, height: 24.0), title: item.playTitle, color: playForeground, spacing: 3.0),
                         action: { [weak strongSelf] in
                             strongSelf?.item?.action(false)
                         }
@@ -444,7 +527,7 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
                     transition: .immediate,
                     component: AnyComponent(ButtonComponent(
                         background: ButtonComponent.Background(style: .actualGlass, color: shuffleGlass, foreground: shuffleForeground, pressedColor: shuffleGlass, cornerRadius: buttonSize.height * 0.5),
-                        content: MusicPlaybackButtonsItemNode.content(icon: "Music/Shuffle", iconSize: CGSize(width: 22.0, height: 22.0), title: item.shuffleTitle, color: shuffleForeground, spacing: 6.0),
+                        content: MusicPlaybackButtonsItemNode.content(icon: "Music/Shuffle", iconSize: CGSize(width: 24.0, height: 24.0), title: item.shuffleTitle, color: shuffleForeground, spacing: 4.0),
                         action: { [weak strongSelf] in
                             strongSelf?.item?.action(true)
                         }
@@ -474,6 +557,103 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
 
     override func animateRemoved(_ currentTimestamp: Double, duration: Double) {
         self.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.15, removeOnCompletion: false)
+    }
+}
+
+/// Add Tracks on the playlist edit screen: one full-width accent Liquid Glass button (Figma "Button - Liquid Glass - Text").
+final class MusicAddTracksButtonItem: ListViewItem, ItemListItem {
+    static let height: CGFloat = 54.0
+
+    let theme: PresentationTheme
+    let title: String
+    let topInset: CGFloat
+    let bottomInset: CGFloat
+    let sectionId: ItemListSectionId
+    let action: () -> Void
+
+    let selectable: Bool = false
+
+    init(theme: PresentationTheme, title: String, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping () -> Void) {
+        self.theme = theme
+        self.title = title
+        self.topInset = topInset
+        self.bottomInset = bottomInset
+        self.sectionId = sectionId
+        self.action = action
+    }
+
+    func nodeConfiguredForParams(async: @escaping (@escaping () -> Void) -> Void, params: ListViewItemLayoutParams, synchronousLoads: Bool, neighbors: ListViewItemNeighbors, completion: @escaping (ListViewItemNode, @escaping () -> (Signal<Void, NoError>?, (ListViewItemApply) -> Void)) -> Void) {
+        async {
+            Queue.mainQueue().async {
+                let node = MusicAddTracksButtonItemNode()
+                let (layout, apply) = node.asyncLayout()(self, params)
+                node.contentSize = layout.contentSize
+                node.insets = layout.insets
+                completion(node, {
+                    return (nil, { _ in apply() })
+                })
+            }
+        }
+    }
+
+    func updateNode(async: @escaping (@escaping () -> Void) -> Void, node: @escaping () -> ListViewItemNode, params: ListViewItemLayoutParams, neighbors: ListViewItemNeighbors, animation: ListViewItemUpdateAnimation, completion: @escaping (ListViewItemNodeLayout, @escaping (ListViewItemApply) -> Void) -> Void) {
+        Queue.mainQueue().async {
+            guard let nodeValue = node() as? MusicAddTracksButtonItemNode else {
+                assertionFailure()
+                return
+            }
+            let (layout, apply) = nodeValue.asyncLayout()(self, params)
+            completion(layout, { _ in
+                apply()
+            })
+        }
+    }
+}
+
+final class MusicAddTracksButtonItemNode: ListViewItemNode {
+    private let button = ComponentView<Empty>()
+    private var item: MusicAddTracksButtonItem?
+
+    init() {
+        super.init(layerBacked: false, rotated: false, seeThrough: false)
+    }
+
+    func asyncLayout() -> (_ item: MusicAddTracksButtonItem, _ params: ListViewItemLayoutParams) -> (ListViewItemNodeLayout, () -> Void) {
+        return { [weak self] item, params in
+            let layout = ListViewItemNodeLayout(contentSize: CGSize(width: params.width, height: MusicAddTracksButtonItem.height), insets: UIEdgeInsets(top: item.topInset, left: 0.0, bottom: item.bottomInset, right: 0.0))
+            return (layout, { [weak self] in
+                guard let strongSelf = self else {
+                    return
+                }
+                strongSelf.item = item
+                let sideInset: CGFloat = 0.0
+                let buttonSize = CGSize(width: params.width - params.leftInset - params.rightInset - sideInset * 2.0, height: MusicAddTracksButtonItem.height)
+                let accent = item.theme.list.itemCheckColors.fillColor
+                let foreground = item.theme.list.itemCheckColors.foregroundColor
+                let content = AnyComponentWithIdentity(id: AnyHashable(item.title), component: AnyComponent(HStack([
+                    AnyComponentWithIdentity(id: 0, component: AnyComponent(BundleIconComponent(name: "Chat/Context Menu/Add", tintColor: foreground, maxSize: CGSize(width: 24.0, height: 24.0)))),
+                    AnyComponentWithIdentity(id: 1, component: AnyComponent(Text(text: item.title, font: Font.semibold(17.0), color: foreground)))
+                ], spacing: 3.0)))
+                let _ = strongSelf.button.update(
+                    transition: .immediate,
+                    component: AnyComponent(ButtonComponent(
+                        background: ButtonComponent.Background(style: .actualGlass, color: accent, foreground: foreground, pressedColor: accent, cornerRadius: buttonSize.height * 0.5),
+                        content: content,
+                        action: { [weak strongSelf] in
+                            strongSelf?.item?.action()
+                        }
+                    )),
+                    environment: {},
+                    containerSize: buttonSize
+                )
+                if let view = strongSelf.button.view {
+                    if view.superview == nil {
+                        strongSelf.view.addSubview(view)
+                    }
+                    view.frame = CGRect(origin: CGPoint(x: params.leftInset + sideInset, y: 0.0), size: buttonSize)
+                }
+            })
+        }
     }
 }
 
