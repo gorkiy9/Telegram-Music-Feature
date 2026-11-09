@@ -19,7 +19,7 @@ import PresentationDataUtils
 public let isMusicSectionEnabled = true
 
 /// The section's strings are not in the language packs yet.
-func musicString(_ strings: PresentationStrings, ru: String, en: String) -> String {
+public func musicString(_ strings: PresentationStrings, ru: String, en: String) -> String {
     return strings.primaryComponent.languageCode.hasPrefix("ru") ? ru : en
 }
 
@@ -222,8 +222,9 @@ public final class MusicScreen: ViewController {
         return (self.navigationController as? NavigationController) ?? (self.context.sharedContext.mainWindow?.viewController as? NavigationController)
     }
 
-    func play(track: MusicTrack, tracks: [MusicTrack], library: MusicLibrary) {
-        let location = library.playlistLocation(track: track, tracks: tracks)
+    /// `queueTitle` names the queue in the player sheet; by default it is the list the track was started from.
+    func play(track: MusicTrack, tracks: [MusicTrack], library: MusicLibrary, queueTitle: String? = nil, queueKind: MusicPlayerQueueKind? = nil, source: (() -> [MusicTrack]?)? = nil) {
+        let location = library.playlistLocation(track: track, tracks: tracks, title: queueTitle ?? self.queueTitle(library: library), kind: queueKind ?? self.queueKind, source: source)
         self.context.sharedContext.mediaManager.setPlaylist((self.context, PeerMessagesMediaPlaylist(context: self.context, location: location, chatLocationContextHolder: nil)), type: .music, control: .playback(.togglePlayPause))
     }
 
@@ -271,7 +272,10 @@ public final class MusicScreen: ViewController {
         guard let first = tracks.first else {
             return
         }
-        self.play(track: first, tracks: tracks, library: library)
+        let playlistId = playlist.id
+        self.play(track: first, tracks: tracks, library: library, queueTitle: musicPlaylistQueueTitle(strings: self.presentationData.strings, playlist: playlist), queueKind: .playlist(playlist.id), source: shuffled ? nil : { [weak library] in
+            return library?.playlist(id: playlistId).flatMap { library?.tracks(of: $0) }
+        })
     }
 
     /// With nothing from the section playing the playlist simply starts.
@@ -288,9 +292,39 @@ public final class MusicScreen: ViewController {
             if queued {
                 self.presentToast(text: next ? musicString(strings, ru: "Плейлист будет следующим", en: "The playlist will play next") : musicString(strings, ru: "Плейлист добавлен в очередь", en: "The playlist was added to the queue"), iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
             } else {
-                self.play(track: tracks[0], tracks: tracks, library: library)
+                self.play(track: tracks[0], tracks: tracks, library: library, queueTitle: musicPlaylistQueueTitle(strings: strings, playlist: playlist), queueKind: .playlist(playlist.id))
             }
         })
+    }
+
+    /// The name of the queue a track started on this screen plays in, as the player sheet shows it.
+    /// What the queue a track started on this screen plays: the player sheet's menu leads back to it.
+    private var queueKind: MusicPlayerQueueKind {
+        switch self.section {
+        case let .songs(artist?):
+            return .artist(artist)
+        case let .playlist(id):
+            return .playlist(id)
+        case .hub, .songs(nil), .artists, .playlists, .favorites:
+            return .tracks
+        }
+    }
+
+    private func queueTitle(library: MusicLibrary) -> String {
+        let strings = self.presentationData.strings
+        switch self.section {
+        case let .songs(artist?):
+            return musicString(strings, ru: "Артист \(artist)", en: "Artist \(artist)")
+        case .favorites:
+            return musicString(strings, ru: "Избранное", en: "Favorites")
+        case let .playlist(id):
+            if let playlist = library.playlist(id: id) {
+                return musicPlaylistQueueTitle(strings: strings, playlist: playlist)
+            }
+            return musicOwnMusicQueueTitle(strings: strings)
+        case .hub, .songs(nil), .artists, .playlists:
+            return musicOwnMusicQueueTitle(strings: strings)
+        }
     }
 
     /// Chat tracks are forwarded as their messages; saved ones have none, so a playlist of them sends its first file.
@@ -417,7 +451,9 @@ public final class MusicScreen: ViewController {
         guard let first = tracks.first else {
             return
         }
-        self.play(track: first, tracks: tracks, library: library)
+        self.play(track: first, tracks: tracks, library: library, queueTitle: musicOwnMusicQueueTitle(strings: self.presentationData.strings), queueKind: .tracks, source: shuffled ? nil : { [weak library] in
+            return library?.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false))
+        })
     }
 
     override public func tabBarItemContextAction(sourceView: ContextExtractedContentContainingView, gesture: ContextGesture) {
@@ -471,40 +507,16 @@ public final class MusicScreen: ViewController {
     }
 
     func addToPlaylist(tracks: [MusicTrack], excluding excludedId: Int?, library: MusicLibrary) {
-        guard !tracks.isEmpty else {
-            return
-        }
-        let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
-        let strings = presentationData.strings
-        let actionSheet = ActionSheetController(presentationData: presentationData)
-        let added: (MusicPlaylist) -> Void = { [weak self, weak library] playlist in
-            library?.add(tracks: tracks, to: playlist.id)
-            let text = tracks.count == 1 ? musicString(strings, ru: "Трек добавлен в «\(playlist.title)»", en: "The track was added to “\(playlist.title)”") : musicString(strings, ru: "Треки добавлены в «\(playlist.title)»", en: "The tracks were added to “\(playlist.title)”")
-            self?.presentToast(text: text, iconName: "Chat/Context Menu/AddCaption")
-        }
-        var items: [ActionSheetItem] = [ActionSheetTextItem(title: musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"))]
-        for playlist in library.playlists where playlist.id != excludedId {
-            items.append(ActionSheetButtonItem(title: playlist.title, action: { [weak actionSheet] in
-                actionSheet?.dismissAnimated()
-                added(playlist)
-            }))
-        }
-        items.append(ActionSheetButtonItem(title: musicString(strings, ru: "Новый плейлист", en: "New Playlist"), action: { [weak self, weak actionSheet, weak library] in
-            actionSheet?.dismissAnimated()
+        presentMusicAddToPlaylistSheet(context: self.context, library: library, tracks: tracks, excluding: excludedId, present: { [weak self] controller in
+            self?.present(controller, in: .window(.root))
+        }, createPlaylist: { [weak self, weak library] completion in
             guard let self, let library else {
                 return
             }
-            self.createPlaylist(library: library, completion: { playlist in
-                added(playlist)
-            })
-        }))
-        actionSheet.setItemGroups([
-            ActionSheetItemGroup(items: items),
-            ActionSheetItemGroup(items: [ActionSheetButtonItem(title: strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
-                actionSheet?.dismissAnimated()
-            })])
-        ])
-        self.present(actionSheet, in: .window(.root))
+            self.createPlaylist(library: library, completion: completion)
+        }, toast: { [weak self] text in
+            self?.presentToast(text: text, iconName: "Chat/Context Menu/AddCaption")
+        })
     }
 
     func setSavedToProfile(track: MusicTrack, isSaved: Bool, library: MusicLibrary) {
@@ -531,7 +543,7 @@ public final class MusicScreen: ViewController {
         let title = tracks.count == 1 ? musicString(strings, ru: "Удалить трек", en: "Delete Track") : musicString(strings, ru: "Удалить треки: \(tracks.count)", en: "Delete \(tracks.count) Tracks")
         var items: [ActionSheetItem] = []
         if tracks.contains(where: \.isSaved) {
-            items.append(ActionSheetTextItem(title: musicString(strings, ru: "Треки из профиля будут убраны из него. Файлы из чатов останутся в чатах.", en: "Tracks from your profile will be removed from it. Files from chats stay in the chats.")))
+            items.append(ActionSheetTextItem(title: musicString(strings, ru: "Треки останутся в профиле и в чатах.", en: "The tracks stay in your profile and in the chats.")))
         } else {
             items.append(ActionSheetTextItem(title: musicString(strings, ru: "Файлы останутся в чатах.", en: "The files stay in the chats.")))
         }
@@ -601,7 +613,7 @@ public final class MusicScreen: ViewController {
         if let library = self.library {
             return library
         }
-        let library = MusicLibrary(context: self.context, playlistTitle: musicString(self.presentationData.strings, ru: "Плейлист", en: "Playlist"))
+        let library = MusicLibrary.shared(context: self.context)
         self.library = library
         return library
     }

@@ -372,6 +372,14 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
     public final var generalScrollDirectionUpdated: (GeneralScrollDirection) -> Void = { _ in }
     
     public var autoScrollWhenReordering = true
+    /// The least time between two steps of a drag; a dragged row moves at most one place per step.
+    public var reorderingStepInterval: Double = 0.2
+    /// Points per frame the list scrolls by while a dragged row is past an edge, from how far past it is.
+    /// Nil keeps the fixed speed.
+    public var reorderingAutoScrollSpeed: ((CGFloat) -> CGFloat)?
+    /// A dragged row takes a neighbour's place only once its centre reaches the neighbour's centre, covering it,
+    /// rather than as soon as it crosses the neighbour's near edge.
+    public var reorderingSwapsAtItemCenter = false
     public private(set) var isReordering = false
     public final var willBeginReorder: (CGPoint) -> Void = { _ in }
     public final var reorderBegan: () -> Void = { }
@@ -765,8 +773,22 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
                         toIndex -= 1
                     }
                 }
+                if self.reorderingSwapsAtItemCenter {
+                    toIndex = reorderItemIndex
+                    for itemNode in self.itemNodes {
+                        guard let itemNodeIndex = itemNode.index, itemNodeIndex != reorderItemIndex else {
+                            continue
+                        }
+                        let itemCenter = itemNode.apparentContentFrame.midY
+                        if itemNodeIndex > reorderItemIndex && verticalOffset >= itemCenter {
+                            toIndex = max(toIndex, itemNodeIndex)
+                        } else if itemNodeIndex < reorderItemIndex && verticalOffset <= itemCenter {
+                            toIndex = min(toIndex, itemNodeIndex)
+                        }
+                    }
+                }
                 if toIndex != reorderItemNode.index {
-                    if let reorderLastTimestamp = self.reorderLastTimestamp, timestamp < reorderLastTimestamp + 0.2 {
+                    if let reorderLastTimestamp = self.reorderLastTimestamp, timestamp < reorderLastTimestamp + self.reorderingStepInterval {
                         return
                     }
                     if reorderNode.currentState?.0 != reorderItemIndex || reorderNode.currentState?.1 != toIndex {
@@ -4815,6 +4837,9 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
             if reorderOffset < effectiveInsets.top + 10.0 {
                 if self.itemNodes[0].apparentFrame.minY < effectiveInsets.top {
                     continueAnimations = true
+                    if let speed = self.reorderingAutoScrollSpeed {
+                        offset = speed(effectiveInsets.top + 10.0 - reorderOffset)
+                    }
                     offsetRanges.offset(IndexRange(first: 0, last: Int.max), offset: offset)
                     scrollingForReorder = true
                 }
@@ -4823,6 +4848,9 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
                     continueAnimations = true
                     if self.reorderScrollStartTimestamp == nil {
                         self.reorderScrollStartTimestamp = timestamp
+                    }
+                    if let speed = self.reorderingAutoScrollSpeed {
+                        offset = speed(reorderOffset - (self.visibleSize.height - effectiveInsets.bottom - 10.0))
                     }
                     offsetRanges.offset(IndexRange(first: 0, last: Int.max), offset: -offset)
                     scrollingForReorder = true

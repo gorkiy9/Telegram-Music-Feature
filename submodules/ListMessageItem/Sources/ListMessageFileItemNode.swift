@@ -374,6 +374,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
     public let extensionIconNode: ASImageNode
     private let extensionIconText: TextNode
     public let iconImageNode: TransformImageNode
+    private var playingIndicatorNode: ListMessagePlayingIndicatorNode?
     private let iconStatusNode: SemanticStatusNode
     private let iconButtonNode: HighlightTrackingButtonNode
     
@@ -1499,6 +1500,25 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     
                     transition.updateFrame(node: strongSelf.iconStatusNode, frame: iconFrame)
                     strongSelf.iconStatusNode.isHidden = displaysCover
+                    
+                    if displaysCover, let playingIndicator = item.playingIndicator {
+                        let indicatorNode: ListMessagePlayingIndicatorNode
+                        if let current = strongSelf.playingIndicatorNode {
+                            indicatorNode = current
+                        } else {
+                            indicatorNode = ListMessagePlayingIndicatorNode()
+                            strongSelf.playingIndicatorNode = indicatorNode
+                            strongSelf.offsetContainerNode.addSubnode(indicatorNode)
+                            indicatorNode.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
+                        }
+                        transition.updateFrame(node: indicatorNode, frame: iconFrame)
+                        indicatorNode.update(size: iconFrame.size, state: playingIndicator)
+                    } else if let indicatorNode = strongSelf.playingIndicatorNode {
+                        strongSelf.playingIndicatorNode = nil
+                        indicatorNode.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.2, removeOnCompletion: false, completion: { [weak indicatorNode] _ in
+                            indicatorNode?.removeFromSupernode()
+                        })
+                    }
                     
                     strongSelf.iconButtonNode.isHidden = item.interaction.toggleMediaPlayback == nil
                     strongSelf.iconButtonNode.frame = iconFrame.insetBy(dx: -8.0, dy: -8.0)

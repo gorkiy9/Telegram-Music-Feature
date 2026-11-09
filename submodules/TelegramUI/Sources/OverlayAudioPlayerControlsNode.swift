@@ -24,6 +24,7 @@ import BundleIconComponent
 import ButtonComponent
 import Markdown
 import TextFormat
+import MusicScreen
 
 private func normalizeValue(_ value: CGFloat) -> CGFloat {
     return round(value * 10.0) / 10.0
@@ -169,11 +170,11 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     private var seekRate: AudioPlaybackRate = .x2
     private var previousRate: AudioPlaybackRate?
     
-    private var currentIsPaused: Bool?
+    private(set) var currentIsPaused: Bool?
     private let playPauseButton: IconButtonNode
     private let playPauseIconNode: PlayPauseIconNode
     
-    private var currentOrder: MusicPlaybackSettingsOrder?
+    private(set) var currentOrder: MusicPlaybackSettingsOrder?
     private let orderButton: IconButtonNode
     
     private var currentLooping: MusicPlaybackSettingsLooping?
@@ -217,6 +218,7 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     private var chapterDisposable: Disposable?
     
     private var previousCaption: NSAttributedString?
+    private var currentChapters: [MediaPlayerScrubbingChapter] = []
     private var chaptersPromise = ValuePromise<[MediaPlayerScrubbingChapter]>([])
     private var currentChapter: MediaPlayerScrubbingChapter?
     
@@ -227,10 +229,77 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     private var infoNodePushed = false
     
     private var currentDuration: Double = 0.0
-    private var currentPosition: Double = 0.0
+    private(set) var currentPosition: Double = 0.0
     
     private var validLayout: (width: CGFloat, leftInset: CGFloat, rightInset: CGFloat, bottomInset: CGFloat, maxHeight: CGFloat, savedMusic: Bool?)?
     private var hasCompletedLayout = false
+    
+    // MARK: Compact sheet
+    
+    /// The Music section's player sheet (Figma Player 277:14091): the queue header over a card with the playing
+    /// track, its progress, the playback buttons and the panel that adds the track to Music, Favorites or a playlist.
+    /// Off, the node lays out as the full player under the queue list.
+    var isCompact = false {
+        didSet {
+            if self.isCompact != oldValue {
+                self.updateStyleVisibility()
+                self.updateScrubberContent()
+            }
+        }
+    }
+    /// The sheet keeps 6 pt from the screen edges, so its bottom corners follow the screen's, 6 pt smaller.
+    var compactBottomCornerRadius: CGFloat = 38.0
+    var queueCount: Int?
+    var queueTitle: String?
+    /// Off while the queue sheet is open: its toolbar names the queue, and the card sits at the screen's bottom.
+    var showsQueueHeader = true {
+        didSet {
+            if self.showsQueueHeader != oldValue {
+                self.updateStyleVisibility()
+            }
+        }
+    }
+    private var compactEffectiveHeaderHeight: CGFloat {
+        return self.showsQueueHeader ? OverlayAudioPlayerControlsNode.compactHeaderHeight : 0.0
+    }
+    struct CompactPanelState: Equatable {
+        /// Nil when the track is not in Music and cannot be added (copy protection, secret chats).
+        var isInMusic: Bool?
+        var isFavorite: Bool
+    }
+    var compactPanelState = CompactPanelState(isInMusic: nil, isFavorite: false)
+    
+    var requestOpenQueue: (() -> Void)?
+    /// The playing track changed: the queue sheet's list follows it.
+    var currentItemChanged: (() -> Void)?
+    /// Play or pause: the queue's playing cover follows it.
+    var pausedChanged: (() -> Void)?
+    var requestToggleSaved: (() -> Void)?
+    var requestToggleFavorite: (() -> Void)?
+    var requestAddToPlaylist: (() -> Void)?
+    var requestMoreMenu: ((ContextReferenceContentNode) -> Void)?
+    
+    private static let compactHeaderHeight: CGFloat = 86.0
+    private static let compactCardHeight: CGFloat = 314.0
+    private static let compactTopCornerRadius: CGFloat = 38.0
+    
+    private let compactShadowView = UIView()
+    private let compactSheetView = UIView()
+    private let compactSheetMask = CAShapeLayer()
+    private let compactCardShadowView = UIView()
+    private let compactCardView = UIView()
+    private let compactGrabberNode = ASImageNode()
+    private let queueTitleNode = ImmediateTextNode()
+    private let queueBadgeNode = ASDisplayNode()
+    private let queueBadgeTextNode = ImmediateTextNode()
+    private let queueSubtitleNode = ImmediateTextNode()
+    private let queueButton = HighlightTrackingButtonNode()
+    private let moreButton = HighlightableButtonNode()
+    private let moreReferenceNode = ContextReferenceContentNode()
+    private let panelButtons: [ComponentView<Empty>] = [ComponentView<Empty>(), ComponentView<Empty>(), ComponentView<Empty>()]
+    private var panelContentIds: [AnyHashable?] = [nil, nil, nil]
+    /// A tapped toggle bounces the icon its tap brings in, once the new state has been laid out.
+    private var pendingPanelBounce: Int?
     
     init(account: Account, engine: TelegramEngine, accountManager: AccountManager<TelegramAccountManagerTypes>, presentationData: PresentationData, status: Signal<(Account, SharedMediaPlayerItemPlaybackStateOrLoading, MediaManagerPlayerType)?, NoError>, chatLocation: ChatLocation, source: ChatHistoryListSource, lottieSettings: LottieRenderingSettings) {
         self.accountManager = accountManager
@@ -331,6 +400,41 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
         
         //self.addSubnode(self.separatorNode)
         
+        self.compactGrabberNode.displaysAsynchronously = false
+        self.compactGrabberNode.isUserInteractionEnabled = false
+        self.queueTitleNode.displaysAsynchronously = false
+        self.queueBadgeTextNode.displaysAsynchronously = false
+        self.queueSubtitleNode.displaysAsynchronously = false
+        for node in [self.queueTitleNode, self.queueBadgeNode, self.queueBadgeTextNode, self.queueSubtitleNode] as [ASDisplayNode] {
+            node.isUserInteractionEnabled = false
+        }
+        self.queueBadgeNode.addSubnode(self.queueBadgeTextNode)
+        self.queueButton.addSubnode(self.queueTitleNode)
+        self.queueButton.addSubnode(self.queueBadgeNode)
+        self.queueButton.addSubnode(self.queueSubtitleNode)
+        self.addSubnode(self.compactGrabberNode)
+        self.addSubnode(self.queueButton)
+        self.moreButton.addSubnode(self.moreReferenceNode)
+        self.moreReferenceNode.isUserInteractionEnabled = false
+        self.addSubnode(self.moreButton)
+        
+        self.compactSheetView.layer.mask = self.compactSheetMask
+        self.compactShadowView.layer.shadowColor = UIColor.black.cgColor
+        self.compactShadowView.layer.shadowOpacity = 0.18
+        self.compactShadowView.layer.shadowRadius = 20.0
+        self.compactShadowView.layer.shadowOffset = CGSize(width: 0.0, height: 8.0)
+        self.compactCardShadowView.layer.shadowColor = UIColor.black.cgColor
+        self.compactCardShadowView.layer.shadowOpacity = 0.08
+        self.compactCardShadowView.layer.shadowRadius = 8.0
+        self.compactCardShadowView.layer.shadowOffset = CGSize(width: 0.0, height: -4.0)
+        self.compactCardView.layer.cornerRadius = OverlayAudioPlayerControlsNode.compactTopCornerRadius
+        self.compactCardView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        self.compactCardView.layer.cornerCurve = .continuous
+        self.compactSheetView.addSubview(self.compactCardShadowView)
+        self.compactSheetView.addSubview(self.compactCardView)
+        self.updateCompactColors()
+        self.updateStyleVisibility()
+        
         let accountId = account.id
         let delayedStatus = status
         |> mapToSignal { value -> Signal<(Account, SharedMediaPlayerItemPlaybackStateOrLoading, MediaManagerPlayerType)?, NoError> in
@@ -395,6 +499,7 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
                 let isFirstTime = strongSelf.currentIsPaused == nil
                 if strongSelf.currentIsPaused != isPaused {
                     strongSelf.currentIsPaused = isPaused
+                    strongSelf.pausedChanged?()
                     
                     strongSelf.updatePlayPauseButton(paused: isPaused, animated: !isFirstTime)
                 }
@@ -471,12 +576,13 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
             if let (_, valueOrLoading, _) = value, case let .state(value) = valueOrLoading, let source = value.item.playbackData?.source {
                 switch source {
                 case let .telegramFile(_, isCopyProtected, _):
-                    strongSelf.shareNode.isHidden = isCopyProtected || forceCopyProtected
+                    strongSelf.shareNode.isHidden = isCopyProtected || forceCopyProtected || strongSelf.isCompact
                 }
             }
             
             if itemUpdated {
                 strongSelf.requestLayout?(.animated(duration: 0.2, curve: .easeInOut))
+                strongSelf.currentItemChanged?()
             }
         })
                 
@@ -541,6 +647,23 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
         self.playPauseButton.addTarget(self, action: #selector(self.playPausePressed), forControlEvents: .touchUpInside)
         self.rateButton.addTarget(self, action: #selector(self.rateButtonPressed), forControlEvents: .touchUpInside)
         self.artistButton.addTarget(self, action: #selector(self.artistPressed), forControlEvents: .touchUpInside)
+        self.queueButton.addTarget(self, action: #selector(self.queuePressed), forControlEvents: .touchUpInside)
+        self.moreButton.addTarget(self, action: #selector(self.morePressed), forControlEvents: .touchUpInside)
+        
+        self.queueButton.highligthedChanged = { [weak self] highlighted in
+            guard let self else {
+                return
+            }
+            for node in [self.queueTitleNode, self.queueBadgeNode, self.queueSubtitleNode] as [ASDisplayNode] {
+                if highlighted {
+                    node.layer.removeAnimation(forKey: "opacity")
+                    node.alpha = 0.4
+                } else {
+                    node.alpha = 1.0
+                    node.layer.animateAlpha(from: 0.4, to: 1.0, duration: 0.2)
+                }
+            }
+        }
         
         self.artistButton.highligthedChanged = { [weak self] highlighted in
             if let strongSelf = self {
@@ -570,6 +693,9 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     
     override func didLoad() {
         super.didLoad()
+        
+        self.view.insertSubview(self.compactSheetView, at: 0)
+        self.view.insertSubview(self.compactShadowView, at: 0)
         
         self.albumArtNode.view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.albumArtTap(_:))))
         
@@ -691,8 +817,11 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
             self.updateRateButton(rate)
         }
         self.separatorNode.backgroundColor = presentationData.theme.list.itemPlainSeparatorColor
+        self.updateCompactColors()
+        self.updateScrubberContent()
         
         self.updateLabels(transition: .immediate)
+        self.requestLayout(transition: .immediate)
     }
     
     private func updateLabels(transition: ContainedViewLayoutTransition) {
@@ -705,7 +834,15 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
         let infoLabelsLeftInset: CGFloat = 53.0
         let infoLabelsRightInset: CGFloat = 32.0
         
-        let infoVerticalOrigin: CGFloat = 21.0
+        var infoVerticalOrigin: CGFloat = 21.0
+        var infoLabelsX: CGFloat = leftInset + sideInset + infoLabelsLeftInset
+        var infoLabelsWidth: CGFloat = width - sideInset * 2.0 - leftInset - rightInset - infoLabelsLeftInset - infoLabelsRightInset
+        if self.isCompact {
+            // Figma Player Row: 48 pt cover at 16, the text 8 pt after it, the more button 40 pt at 16 from the right.
+            infoVerticalOrigin = self.compactEffectiveHeaderHeight + 19.0
+            infoLabelsX = 72.0
+            infoLabelsWidth = width - infoLabelsX - 16.0 - 40.0 - 8.0
+        }
         
         let (titleString, descriptionString, hasArtist, caption) = stringsForDisplayData(self.displayData, presentationData: self.presentationData)
         
@@ -713,13 +850,14 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
             self.previousCaption = caption
             let chapters = caption.flatMap { parseMediaPlayerChapters($0) } ?? []
             self.chaptersPromise.set(chapters)
-            self.scrubberNode.updateContent(.standard(lineHeight: 7.0, lineCap: .round, scrubberHandle: .none, backgroundColor: self.presentationData.theme.list.controlSecondaryColor.withMultipliedAlpha(0.5), foregroundColor: self.presentationData.theme.list.itemPrimaryTextColor, bufferingColor: self.presentationData.theme.list.itemPrimaryTextColor.withAlphaComponent(0.4), chapters: chapters))
+            self.currentChapters = chapters
+            self.updateScrubberContent()
         }
         
         self.artistButton.isUserInteractionEnabled = hasArtist
         
         let makeTitleLayout = TextNode.asyncLayout(self.titleNode)
-        let (titleLayout, titleApply) = makeTitleLayout(TextNodeLayoutArguments(attributedString: titleString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: width - sideInset * 2.0 - leftInset - rightInset - infoLabelsLeftInset - infoLabelsRightInset, height: CGFloat.greatestFiniteMagnitude), alignment: .left, lineSpacing: 0.0, cutout: nil, insets: UIEdgeInsets()))
+        let (titleLayout, titleApply) = makeTitleLayout(TextNodeLayoutArguments(attributedString: titleString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: infoLabelsWidth, height: CGFloat.greatestFiniteMagnitude), alignment: .left, lineSpacing: 0.0, cutout: nil, insets: UIEdgeInsets()))
         
         let titleSize = self.title.update(
             transition: .immediate,
@@ -727,22 +865,22 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
                 MarqueeComponent(attributedText: titleString ?? NSAttributedString())
             ),
             environment: {},
-            containerSize: CGSize(width: width - sideInset * 2.0 - leftInset - rightInset - infoLabelsLeftInset - infoLabelsRightInset, height: CGFloat.greatestFiniteMagnitude)
+            containerSize: CGSize(width: infoLabelsWidth, height: CGFloat.greatestFiniteMagnitude)
         )
         if let titleView = self.title.view {
             if titleView.superview == nil {
                 self.view.addSubview(titleView)
             }
-            transition.updateFrame(view: titleView, frame: CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - titleSize.width) / 2.0) : (leftInset + sideInset + infoLabelsLeftInset), y: infoVerticalOrigin), size: titleSize))
+            transition.updateFrame(view: titleView, frame: CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - titleSize.width) / 2.0) : infoLabelsX, y: infoVerticalOrigin), size: titleSize))
         }
         
         let makeDescriptionLayout = TextNode.asyncLayout(self.descriptionNode)
-        let (descriptionLayout, descriptionApply) = makeDescriptionLayout(TextNodeLayoutArguments(attributedString: descriptionString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: width - sideInset * 2.0 - leftInset - rightInset - infoLabelsLeftInset - infoLabelsRightInset, height: CGFloat.greatestFiniteMagnitude), alignment: .left, lineSpacing: 0.0, cutout: nil, insets: UIEdgeInsets()))
+        let (descriptionLayout, descriptionApply) = makeDescriptionLayout(TextNodeLayoutArguments(attributedString: descriptionString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: infoLabelsWidth, height: CGFloat.greatestFiniteMagnitude), alignment: .left, lineSpacing: 0.0, cutout: nil, insets: UIEdgeInsets()))
         
-        transition.updateFrame(node: self.titleNode, frame: CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - titleLayout.size.width) / 2.0) : (leftInset + sideInset + infoLabelsLeftInset), y: infoVerticalOrigin + 1.0), size: titleLayout.size))
+        transition.updateFrame(node: self.titleNode, frame: CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - titleLayout.size.width) / 2.0) : infoLabelsX, y: infoVerticalOrigin + 1.0), size: titleLayout.size))
         let _ = titleApply()
         
-        let descriptionFrame = CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - descriptionLayout.size.width) / 2.0) : (leftInset + sideInset + infoLabelsLeftInset), y: infoVerticalOrigin + 24.0), size: descriptionLayout.size)
+        let descriptionFrame = CGRect(origin: CGPoint(x: self.isExpanded ? floor((width - descriptionLayout.size.width) / 2.0) : infoLabelsX, y: infoVerticalOrigin + 24.0), size: descriptionLayout.size)
         transition.updateFrame(node: self.descriptionNode, frame: descriptionFrame)
         let _ = descriptionApply()
         
@@ -775,6 +913,11 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     }
     
     private func updateOrderButton(_ order: MusicPlaybackSettingsOrder) {
+        if self.isCompact {
+            // The sheet's left button is Shuffle only: accent while the order is random.
+            self.orderButton.icon = generateTintedImage(image: UIImage(bundleImageName: "GlobalMusicPlayer/OrderRandom"), color: order == .random ? self.presentationData.theme.list.itemAccentColor : self.presentationData.theme.list.itemSecondaryTextColor)
+            return
+        }
         switch order {
             case .regular:
                 self.orderButton.icon = generateTintedImage(image: UIImage(bundleImageName: "GlobalMusicPlayer/OrderReverse"), color: self.presentationData.theme.list.itemSecondaryTextColor)
@@ -836,6 +979,12 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
         var transition = transition
         if !self.hasCompletedLayout || previousWidth == nil || previousWidth?.isZero == true {
             transition = .immediate
+        }
+        
+        if self.isCompact {
+            let height = self.updateCompactLayout(width: width, transition: transition)
+            self.hasCompletedLayout = true
+            return height
         }
         
         let finalPanelHeight = OverlayAudioPlayerControlsNode.heightForLayout(width: width, leftInset: leftInset, rightInset: rightInset, bottomInset: bottomInset, maxHeight: maxHeight, isExpanded: self.isExpanded, savedMusic: savedMusic)
@@ -974,6 +1123,267 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
         return finalPanelHeight
     }
     
+    // MARK: Compact sheet layout
+    
+    private func updateScrubberContent() {
+        let theme = self.presentationData.theme
+        // Figma Track Progress: an 8 pt track; the full player keeps its 7 pt one.
+        self.scrubberNode.updateContent(.standard(lineHeight: self.isCompact ? 8.0 : 7.0, lineCap: .round, scrubberHandle: .none, backgroundColor: theme.list.controlSecondaryColor.withMultipliedAlpha(0.5), foregroundColor: theme.list.itemPrimaryTextColor, bufferingColor: theme.list.itemPrimaryTextColor.withAlphaComponent(0.4), chapters: self.currentChapters))
+    }
+    
+    private func updateCompactColors() {
+        let theme = self.presentationData.theme
+        // Figma color/bg/plain: the Music section's own background.
+        self.compactSheetView.backgroundColor = theme.chatList.pinnedItemBackgroundColor
+        self.compactCardView.backgroundColor = theme.list.itemModalBlocksBackgroundColor
+        self.compactCardShadowView.backgroundColor = .clear
+        self.compactGrabberNode.image = generateStretchableFilledCircleImage(diameter: 6.0, color: theme.list.controlSecondaryColor)
+        self.queueBadgeNode.backgroundColor = theme.list.itemPrimaryTextColor.withMultipliedAlpha(0.08)
+        self.moreButton.setImage(generateTintedImage(image: UIImage(bundleImageName: "Music/More"), color: theme.list.itemPrimaryTextColor), for: [])
+    }
+    
+    private func updateStyleVisibility() {
+        let isCompact = self.isCompact
+        // One shadow under the mini player whatever the header does: its outline follows the sheet, so it only moves.
+        self.compactShadowView.isHidden = !isCompact
+        self.compactSheetView.isHidden = !isCompact
+        self.compactGrabberNode.isHidden = !isCompact || !self.showsQueueHeader
+        self.queueButton.isHidden = !isCompact || !self.showsQueueHeader
+        self.moreButton.isHidden = !isCompact
+        for button in self.panelButtons {
+            button.view?.isHidden = !isCompact
+        }
+        self.backgroundNode.isHidden = isCompact
+        if isCompact {
+            // Share moves to the more menu; adding to the profile is the panel's first button.
+            self.shareNode.isHidden = true
+            if let profileAudioView = self.profileAudio?.view {
+                profileAudioView.removeFromSuperview()
+            }
+            self.profileAudio = nil
+        }
+        if let order = self.currentOrder {
+            self.updateOrderButton(order)
+        }
+    }
+    
+    /// The sheet's outline with iOS's continuous corners (the system's squircle, Figma's iOS corner smoothing): two
+    /// continuous rounded halves, one with the top radius and one with the bottom one, filled as their union. Always
+    /// the same elements, so the outline animates between sizes.
+    private func compactSheetPath(size: CGSize, topRadius: CGFloat, bottomRadius: CGFloat) -> UIBezierPath {
+        let half = floor(size.height / 2.0)
+        let path = UIBezierPath(roundedRect: CGRect(x: 0.0, y: 0.0, width: size.width, height: half + 1.0), byRoundingCorners: [.topLeft, .topRight], cornerRadii: CGSize(width: topRadius, height: topRadius))
+        path.append(UIBezierPath(roundedRect: CGRect(x: 0.0, y: half, width: size.width, height: size.height - half), byRoundingCorners: [.bottomLeft, .bottomRight], cornerRadii: CGSize(width: bottomRadius, height: bottomRadius)))
+        return path
+    }
+    
+    /// Figma Player Sheet 275:2027: grabber 16, queue header 70, then the card: row 80, progress 44, buttons 84,
+    /// panel 24 + 50 and 32 below it.
+    private func updateCompactLayout(width: CGFloat, transition: ContainedViewLayoutTransition) -> CGFloat {
+        let theme = self.presentationData.theme
+        let strings = self.presentationData.strings
+        let headerHeight = self.compactEffectiveHeaderHeight
+        let height = headerHeight + OverlayAudioPlayerControlsNode.compactCardHeight
+        let size = CGSize(width: width, height: height)
+        let bounds = CGRect(origin: CGPoint(), size: size)
+        
+        let topRadius = OverlayAudioPlayerControlsNode.compactTopCornerRadius
+        let sheetPath = self.compactSheetPath(size: size, topRadius: topRadius, bottomRadius: max(topRadius, self.compactBottomCornerRadius))
+        transition.updateFrame(view: self.compactShadowView, frame: bounds)
+        transition.updateFrame(view: self.compactSheetView, frame: bounds)
+        // The outline moves with the frame: a path set at once while the frame animates made the card jump at the
+        // corners as the sheet left the screen edges.
+        self.compactSheetMask.frame = bounds
+        OverlayAudioPlayerControlsNode.updateAnimatedPath(layer: self.compactSheetMask, keyPath: "path", path: sheetPath.cgPath, transition: transition)
+        OverlayAudioPlayerControlsNode.updateAnimatedPath(layer: self.compactShadowView.layer, keyPath: "shadowPath", path: sheetPath.cgPath, transition: transition)
+        
+        let cardFrame = CGRect(x: 0.0, y: headerHeight, width: width, height: height - headerHeight + topRadius)
+        transition.updateFrame(view: self.compactCardView, frame: cardFrame)
+        transition.updateFrame(view: self.compactCardShadowView, frame: cardFrame)
+        OverlayAudioPlayerControlsNode.updateAnimatedPath(layer: self.compactCardShadowView.layer, keyPath: "shadowPath", path: UIBezierPath(roundedRect: CGRect(origin: CGPoint(), size: cardFrame.size), byRoundingCorners: [.topLeft, .topRight], cornerRadii: CGSize(width: topRadius, height: topRadius)).cgPath, transition: transition)
+        
+        // The player's own grabber, 36 × 6 in the controlSecondary colour.
+        transition.updateFrame(node: self.compactGrabberNode, frame: CGRect(x: floor((width - 36.0) / 2.0), y: 5.0, width: 36.0, height: 6.0))
+        
+        // Queue header: the queue's source, "Очередь" with the track count under it.
+        self.queueTitleNode.attributedText = NSAttributedString(string: MusicPlayerSupport.queueLabel(strings: strings), font: Font.medium(16.0), textColor: theme.list.itemPrimaryTextColor)
+        let queueTitleSize = self.queueTitleNode.updateLayout(CGSize(width: width - 80.0, height: 100.0))
+        var badgeSize = CGSize()
+        if let queueCount = self.queueCount {
+            self.queueBadgeTextNode.attributedText = NSAttributedString(string: presentationStringsFormattedNumber(Int32(clamping: queueCount), self.presentationData.dateTimeFormat.groupingSeparator), font: Font.medium(12.0), textColor: theme.list.itemPrimaryTextColor)
+            let badgeTextSize = self.queueBadgeTextNode.updateLayout(CGSize(width: 100.0, height: 100.0))
+            badgeSize = CGSize(width: max(20.0, badgeTextSize.width + 8.0), height: 20.0)
+            self.queueBadgeTextNode.frame = CGRect(origin: CGPoint(x: floor((badgeSize.width - badgeTextSize.width) / 2.0), y: floor((badgeSize.height - badgeTextSize.height) / 2.0)), size: badgeTextSize)
+            self.queueBadgeNode.isHidden = false
+        } else {
+            self.queueBadgeNode.isHidden = true
+        }
+        self.queueBadgeNode.cornerRadius = badgeSize.height / 2.0
+        let queueRowWidth = queueTitleSize.width + (badgeSize.width > 0.0 ? 8.0 + badgeSize.width : 0.0)
+        // Figma Songs List 277:3982: the queue's source on top, «Очередь» with the count 8 pt under it.
+        let queueRowCenterY: CGFloat = 16.0 + 8.0 + 18.0 + 8.0 + 10.0
+        let queueRowX = floor((width - queueRowWidth) / 2.0)
+        transition.updateFrame(node: self.queueTitleNode, frame: CGRect(origin: CGPoint(x: queueRowX, y: floor(queueRowCenterY - queueTitleSize.height / 2.0)), size: queueTitleSize))
+        transition.updateFrame(node: self.queueBadgeNode, frame: CGRect(origin: CGPoint(x: queueRowX + queueTitleSize.width + 8.0, y: queueRowCenterY - badgeSize.height / 2.0), size: badgeSize))
+        
+        self.queueSubtitleNode.attributedText = NSAttributedString(string: self.queueTitle ?? "", font: Font.regular(13.0), textColor: theme.list.sectionHeaderTextColor)
+        self.queueSubtitleNode.truncationType = .end
+        self.queueSubtitleNode.maximumNumberOfLines = 1
+        let queueSubtitleSize = self.queueSubtitleNode.updateLayout(CGSize(width: width - 40.0, height: 100.0))
+        transition.updateFrame(node: self.queueSubtitleNode, frame: CGRect(origin: CGPoint(x: floor((width - queueSubtitleSize.width) / 2.0), y: 16.0 + 8.0 + floor((18.0 - queueSubtitleSize.height) / 2.0)), size: queueSubtitleSize))
+        transition.updateFrame(node: self.queueButton, frame: CGRect(x: 0.0, y: 0.0, width: width, height: headerHeight))
+        
+        // Player Row.
+        self.updateLabels(transition: transition)
+        let albumArtSize = CGSize(width: 48.0, height: 48.0)
+        let applyAlbumArt = self.albumArtNode.asyncLayout()(TransformImageArguments(corners: ImageCorners(radius: albumArtSize.width / 2.0), imageSize: albumArtSize, boundingSize: albumArtSize, intrinsicInsets: UIEdgeInsets()))
+        applyAlbumArt()
+        transition.updateFrame(node: self.albumArtNode, frame: CGRect(origin: CGPoint(x: 16.0, y: headerHeight + 16.0), size: albumArtSize))
+        let moreFrame = CGRect(x: width - 16.0 - 40.0, y: headerHeight + 20.0, width: 40.0, height: 40.0)
+        transition.updateFrame(node: self.moreButton, frame: moreFrame)
+        self.moreReferenceNode.frame = CGRect(origin: CGPoint(), size: moreFrame.size)
+        
+        // Track Progress: the track 8 pt below the row, the times 12 pt under it.
+        let progressSideInset: CGFloat = 20.0
+        let trackY = headerHeight + 80.0 + 8.0
+        transition.updateFrame(node: self.scrubberNode, frame: CGRect(x: progressSideInset, y: trackY + 4.0 - 13.0, width: width - progressSideInset * 2.0, height: 26.0))
+        let timeY = trackY + 8.0 + 12.0 - 2.0
+        transition.updateFrame(node: self.leftDurationLabel, frame: CGRect(x: progressSideInset, y: timeY, width: 100.0, height: 20.0))
+        transition.updateFrame(node: self.rightDurationLabel, frame: CGRect(x: width - progressSideInset - 100.0, y: timeY, width: 100.0, height: 20.0))
+        let infoSize = self.infoNode.measure(CGSize(width: width - 60.0 * 2.0 - 100.0, height: 100.0))
+        self.infoNode.bounds = CGRect(origin: CGPoint(), size: infoSize)
+        transition.updatePosition(node: self.infoNode, position: CGPoint(x: width / 2.0, y: timeY + 10.0))
+        let rateRightOffset = timestampLabelWidthForDuration(self.currentDuration)
+        transition.updateFrame(node: self.rateButton, frame: CGRect(x: width - progressSideInset - rateRightOffset - 30.0, y: timeY - 12.0, width: 24.0, height: 44.0))
+        
+        // Track Controls: shuffle and repeat 32 pt from the edges, previous and next 83.5 pt from play.
+        let buttonSize = CGSize(width: 64.0, height: 64.0)
+        let controlsCenterY = headerHeight + 124.0 + 42.0
+        let buttonFrame: (CGFloat) -> CGRect = { centerX in
+            return CGRect(x: floor(centerX - buttonSize.width / 2.0), y: floor(controlsCenterY - buttonSize.height / 2.0), width: buttonSize.width, height: buttonSize.height)
+        }
+        transition.updateFrame(node: self.orderButton, frame: buttonFrame(32.0))
+        transition.updateFrame(node: self.loopingButton, frame: buttonFrame(width - 32.0))
+        transition.updateFrame(node: self.backwardButton, frame: buttonFrame(width / 2.0 - 83.5))
+        transition.updateFrame(node: self.forwardButton, frame: buttonFrame(width / 2.0 + 83.5))
+        transition.updateFrame(node: self.playPauseButton, frame: buttonFrame(width / 2.0))
+        transition.updateFrame(node: self.playPauseIconNode, frame: CGRect(origin: CGPoint(x: -6.0, y: -6.0), size: CGSize(width: 76.0, height: 76.0)))
+        
+        // Track Menu: Add to Music, Favorites, Add to Playlist.
+        let panelSideInset: CGFloat = 20.0
+        let panelSpacing: CGFloat = 8.0
+        let panelHeight: CGFloat = 50.0
+        let panelY = headerHeight + 208.0 + 24.0
+        let panelButtonWidth = floor((width - panelSideInset * 2.0 - panelSpacing * 2.0) / 3.0)
+        let state = self.compactPanelState
+        let accent = theme.list.itemAccentColor
+        let foreground = theme.list.itemPrimaryTextColor
+        // The section's glass buttons: near-clear glass, tinted with the accent while the track is added.
+        let plainGlass = theme.overallDarkAppearance ? UIColor(white: 0.0, alpha: 0.01) : UIColor(white: 1.0, alpha: 0.01)
+        let activeGlass = accent.withMultipliedAlpha(0.1)
+        // Icons drawn for the player: the same 30 pt canvas, glyph size and 2 pt stroke as shuffle and repeat.
+        let panelItems: [(icon: String, isActive: Bool, isEnabled: Bool, action: () -> Void)] = [
+            (state.isInMusic == true ? "Music/PlayerCheck" : "Music/PlayerAdd", state.isInMusic == true, state.isInMusic != nil, { [weak self] in
+                self?.requestToggleSaved?()
+            }),
+            (state.isFavorite ? "Music/PlayerStarSlash" : "Music/PlayerStar", state.isFavorite, true, { [weak self] in
+                self?.requestToggleFavorite?()
+            }),
+            ("Music/PlayerAddToPlaylist", false, true, { [weak self] in
+                self?.requestAddToPlaylist?()
+            })
+        ]
+        for (index, item) in panelItems.enumerated() {
+            let color = item.isActive ? accent : foreground
+            let glass = item.isActive ? activeGlass : plainGlass
+            let buttonSize = CGSize(width: index == panelItems.count - 1 ? width - panelSideInset * 2.0 - (panelButtonWidth + panelSpacing) * 2.0 : panelButtonWidth, height: panelHeight)
+            let contentId = AnyHashable("\(item.icon) \(item.isActive)")
+            let contentChanged = self.panelContentIds[index] != nil && self.panelContentIds[index] != contentId
+            self.panelContentIds[index] = contentId
+            let isToggle = index != panelItems.count - 1
+            let _ = self.panelButtons[index].update(
+                transition: .immediate,
+                component: AnyComponent(ButtonComponent(
+                    background: ButtonComponent.Background(style: .actualGlass, color: glass, foreground: color, pressedColor: glass, cornerRadius: panelHeight * 0.5),
+                    content: AnyComponentWithIdentity(id: contentId, component: AnyComponent(BundleIconComponent(name: item.icon, tintColor: color))),
+                    isEnabled: item.isEnabled,
+                    action: { [weak self] in
+                        self?.panelButtonTapped(index: index, isToggle: isToggle)
+                        item.action()
+                    }
+                )),
+                environment: {},
+                containerSize: buttonSize
+            )
+            if let view = self.panelButtons[index].view {
+                if view.superview == nil {
+                    self.view.addSubview(view)
+                }
+                view.isHidden = false
+                transition.updateFrame(view: view, frame: CGRect(origin: CGPoint(x: panelSideInset + CGFloat(index) * (panelButtonWidth + panelSpacing), y: panelY), size: buttonSize))
+                if contentChanged && self.pendingPanelBounce == index {
+                    self.pendingPanelBounce = nil
+                    MusicButtonIconAnimation.bounce(in: view)
+                }
+            }
+        }
+        
+        return height
+    }
+    
+    /// Sets a layer's path (a mask's or a shadow's) along the transition, starting from what is on screen, so a change
+    /// that interrupts a running one picks it up mid-flight.
+    static func updateAnimatedPath(layer: CALayer, keyPath: String, path: CGPath, transition: ContainedViewLayoutTransition) {
+        let read: (CALayer?) -> CGPath? = { layer in
+            if keyPath == "path" {
+                return (layer as? CAShapeLayer)?.path
+            } else {
+                return layer?.shadowPath
+            }
+        }
+        let currentPath = read(layer)
+        if let currentPath, currentPath == path {
+            return
+        }
+        var fromPath = currentPath
+        if layer.animation(forKey: keyPath) != nil, let presentationPath = read(layer.presentation()) {
+            fromPath = presentationPath
+        }
+        layer.removeAnimation(forKey: keyPath)
+        if keyPath == "path" {
+            (layer as? CAShapeLayer)?.path = path
+        } else {
+            layer.shadowPath = path
+        }
+        if case let .animated(duration, curve) = transition, let fromPath {
+            layer.animate(from: fromPath, to: path, keyPath: keyPath, timingFunction: curve.timingFunction, duration: duration, mediaTimingFunction: curve.mediaTimingFunction)
+        }
+    }
+    
+    private func panelButtonTapped(index: Int, isToggle: Bool) {
+        guard isToggle else {
+            MusicButtonIconAnimation.bounce(in: self.panelButtons[index].view)
+            return
+        }
+        // The new icon arrives with the library's next state; a tap that changes nothing bounces the current one.
+        self.pendingPanelBounce = index
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: { [weak self] in
+            guard let self, self.pendingPanelBounce == index else {
+                return
+            }
+            self.pendingPanelBounce = nil
+            MusicButtonIconAnimation.bounce(in: self.panelButtons[index].view)
+        })
+    }
+
+    @objc private func queuePressed() {
+        self.requestOpenQueue?()
+    }
+    
+    @objc private func morePressed() {
+        self.requestMoreMenu?(self.moreReferenceNode)
+    }
+    
     func collapse() {
         if self.isExpanded {
             self.isExpanded = false
@@ -1003,7 +1413,7 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     
     @objc func orderPressed() {
         if let order = self.currentOrder {
-            let nextOrder: MusicPlaybackSettingsOrder
+            var nextOrder: MusicPlaybackSettingsOrder
             switch order {
                 case .regular:
                     nextOrder = .reversed
@@ -1011,6 +1421,9 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
                     nextOrder = .random
                 case .random:
                     nextOrder = .regular
+            }
+            if self.isCompact {
+                nextOrder = order == .random ? .regular : .random
             }
             let _ = updateMusicPlaybackSettingsInteractively(accountManager: self.accountManager, {
                 return $0.withUpdatedOrder(nextOrder)
@@ -1294,6 +1707,19 @@ private final class HeaderContextReferenceContentSource: ContextReferenceContent
         self.controller = controller
         self.sourceNode = sourceNode
         self.shouldBeDismissed = shouldBeDismissed
+    }
+    
+    func transitionInfo() -> ContextControllerReferenceViewInfo? {
+        return ContextControllerReferenceViewInfo(referenceView: self.sourceNode.view, contentAreaInScreenSpace: mainWindowScreenBounds)
+    }
+}
+
+/// The sheet's more button: the menu opens from it.
+final class OverlayAudioPlayerReferenceContentSource: ContextReferenceContentSource {
+    private let sourceNode: ContextReferenceContentNode
+    
+    init(sourceNode: ContextReferenceContentNode) {
+        self.sourceNode = sourceNode
     }
     
     func transitionInfo() -> ContextControllerReferenceViewInfo? {

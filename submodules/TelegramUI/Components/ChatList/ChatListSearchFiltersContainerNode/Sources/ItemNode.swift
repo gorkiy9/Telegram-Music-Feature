@@ -177,6 +177,22 @@ final class ItemNode: ASDisplayNode {
         }
     }
     
+    /// A plain titled tab (no icon, no badge), styled as the filters above.
+    func update(title: String, presentationData: PresentationData, selectionFraction: CGFloat) {
+        self.selectionFraction = selectionFraction
+        self.titleNode.attributedText = NSAttributedString(string: title, font: Font.medium(15.0), textColor: presentationData.theme.chat.inputPanel.panelControlColor)
+        if let titleBadgeView = self.titleBadgeView {
+            self.titleBadgeView = nil
+            titleBadgeView.removeFromSuperview()
+        }
+        self.buttonNode.accessibilityLabel = title
+        self.buttonNode.accessibilityTraits = selectionFraction == 1.0 ? [.button, .selected] : [.button]
+        if self.theme !== presentationData.theme {
+            self.theme = presentationData.theme
+            self.iconNode.image = nil
+        }
+    }
+    
     func updateLayout(height: CGFloat, transition: ContainedViewLayoutTransition) -> CGFloat {
         var iconInset: CGFloat = 0.0
         if let image = self.iconNode.image {

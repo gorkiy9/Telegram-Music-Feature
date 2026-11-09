@@ -546,7 +546,10 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
             component: AnyComponent(ButtonComponent(
                 background: background,
                 content: content,
-                action: { [weak self] in
+                action: { [weak self, weak view] in
+                    if action == .play || action == .shuffle {
+                        MusicButtonIconAnimation.bounce(in: view?.view)
+                    }
                     self?.item?.action(action)
                 }
             )),

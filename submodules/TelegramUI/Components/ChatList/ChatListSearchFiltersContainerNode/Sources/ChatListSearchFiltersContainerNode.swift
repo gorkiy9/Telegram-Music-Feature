@@ -11,15 +11,20 @@ import ComponentDisplayAdapters
 
 public enum ChatListSearchFilterEntryId: Hashable {
     case filter(Int64)
+    case custom(Int64)
 }
 
 public enum ChatListSearchFilterEntry: Equatable {
     case filter(ChatListSearchFilter)
+    /// A plain titled tab for searches outside the chat list (Music), drawn like the chat list's filters.
+    case custom(id: Int64, title: String)
     
     public var id: ChatListSearchFilterEntryId {
         switch self {
         case let .filter(filter):
             return .filter(filter.id)
+        case let .custom(id, _):
+            return .custom(id)
         }
     }
 }
@@ -33,6 +38,7 @@ public final class ChatListSearchFiltersContainerNode: ASDisplayNode {
     private var itemNodes: [ChatListSearchFilterEntryId: ItemNode] = [:]
     
     public var filterPressed: ((ChatListSearchFilter) -> Void)?
+    public var customFilterPressed: ((Int64) -> Void)?
 
     private var currentParams: (size: CGSize, sideInset: CGFloat, filters: [ChatListSearchFilterEntry], selectedFilter: ChatListSearchFilterEntryId?, transitionFraction: CGFloat, presentationData: PresentationData)?
         
@@ -90,7 +96,7 @@ public final class ChatListSearchFiltersContainerNode: ASDisplayNode {
         var hasSelection = false
         for i in 0 ..< filters.count {
             let filter = filters[i]
-            if case let .filter(type) = filter {
+            do {
                 let itemNode: ItemNode
                 var itemNodeTransition = transition
                 if let current = self.itemNodes[filter.id] {
@@ -98,7 +104,12 @@ public final class ChatListSearchFiltersContainerNode: ASDisplayNode {
                 } else {
                     itemNodeTransition = .immediate
                     itemNode = ItemNode(pressed: { [weak self] in
-                        self?.filterPressed?(type)
+                        switch filter {
+                        case let .filter(type):
+                            self?.filterPressed?(type)
+                        case let .custom(id, _):
+                            self?.customFilterPressed?(id)
+                        }
                     })
                     self.itemNodes[filter.id] = itemNode
                 }
@@ -115,12 +126,17 @@ public final class ChatListSearchFiltersContainerNode: ASDisplayNode {
                     selectionFraction = 0.0
                 }
                 
-                var displayNewBadge = false
-                if case .globalPosts = type {
-                    displayNewBadge = displayGlobalPostsNewBadge
+                switch filter {
+                case let .filter(type):
+                    var displayNewBadge = false
+                    if case .globalPosts = type {
+                        displayNewBadge = displayGlobalPostsNewBadge
+                    }
+                    
+                    itemNode.update(type: type, displayNewBadge: displayNewBadge, presentationData: presentationData, selectionFraction: selectionFraction, transition: itemNodeTransition)
+                case let .custom(_, title):
+                    itemNode.update(title: title, presentationData: presentationData, selectionFraction: selectionFraction)
                 }
-                
-                itemNode.update(type: type, displayNewBadge: displayNewBadge, presentationData: presentationData, selectionFraction: selectionFraction, transition: itemNodeTransition)
             }
         }
         

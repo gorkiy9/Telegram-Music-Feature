@@ -439,6 +439,8 @@ public final class ChatListSearchContainerNode: SearchDisplayControllerContentNo
                     default:
                         return true
                     }
+                case .custom:
+                    return false
                 }
             }
             |> distinctUntilChanged

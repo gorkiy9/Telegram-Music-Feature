@@ -11,6 +11,7 @@ import TelegramUIPreferences
 import MergeLists
 import ItemListUI
 import ListMessageItem
+import UniversalMediaPlayer
 import ContactsPeerItem
 import ChatListSearchItemHeader
 import ContextUI
@@ -22,6 +23,7 @@ import GlassControls
 import EdgeEffect
 import SearchInputPanelComponent
 import SearchBarNode
+import ChatListSearchFiltersContainerNode
 import MultilineTextComponent
 
 private enum MusicListEntryId: Hashable {
@@ -64,6 +66,31 @@ private enum MusicListEntryContent {
     case track(MusicTrack, isSelected: Bool?, isFavorite: Bool, isPicked: Bool?)
     case artist(MusicArtist)
     case playlist(MusicPlaylist, subtitle: String)
+}
+
+/// What an open search looks through, switched by the tabs above the keyboard (Figma Search, 251:22733).
+private enum MusicSearchScope: Int64, CaseIterable {
+    case all
+    case tracks
+    case playlists
+    case artists
+    case favorites
+}
+
+/// The All tab's categories: each shows a few rows until Show More (Figma Music / Search, 291:16311).
+private enum MusicSearchCategory: CaseIterable {
+    case playlists
+    case artists
+    case tracks
+
+    var limit: Int {
+        switch self {
+        case .playlists, .artists:
+            return 3
+        case .tracks:
+            return 5
+        }
+    }
 }
 
 private struct MusicListEntry: Comparable, Identifiable {
@@ -176,6 +203,9 @@ final class MusicScreenNode: ASDisplayNode {
     private var navigationScrollOffset: CGFloat = 0.0
     private var validLayout: ContainerViewLayout?
     private var libraryDisposable: Disposable?
+    /// The track the player is on and whether it plays: its row shows the sound wave on the cover, as in the queue.
+    private var playingTrack: (fileId: Int64, isPaused: Bool)?
+    private var playingDisposable: Disposable?
 
     /// Selection of tracks to remove: Edit on the tab, the check button from Settings, Select Tracks in a list's menu.
     private(set) var isSelecting = false
@@ -209,6 +239,12 @@ final class MusicScreenNode: ASDisplayNode {
     private var playlistSearchPanel: ComponentView<Empty>?
     /// The client's search bar for screens with the navigation bar: it grows out of the bar's field, as in Mini Apps and Contacts.
     private var searchBarNode: SearchBarNode?
+    /// The scope tabs above the keyboard: the chat list search's filter bar.
+    private var searchFiltersNode: ChatListSearchFiltersContainerNode?
+    private var searchScope: MusicSearchScope = .all
+    /// All tab: categories opened with Show More, and those that have rows hidden.
+    private var expandedSearchCategories = Set<MusicSearchCategory>()
+    private var searchCategoriesWithMore = Set<MusicSearchCategory>()
 
     private var playlistHeaderSpacerHeight: CGFloat {
         guard self.isPlaylistHeaderExpanded, let layout = self.validLayout else {
@@ -241,6 +277,7 @@ final class MusicScreenNode: ASDisplayNode {
 
         super.init()
 
+        self.searchScope = self.defaultSearchScope
         self.backgroundColor = self.backgroundColor(theme: presentationData.theme)
         self.addSubnode(self.listNode)
         self.addSubnode(self.indexNode)
@@ -277,6 +314,31 @@ final class MusicScreenNode: ASDisplayNode {
         self.indexNode.indexSelected = { [weak self] letter in
             self?.scrollToSection(letter: letter)
         }
+        self.playingDisposable = (context.sharedContext.mediaManager.musicMediaPlayerState
+        |> map { state -> (Int64, Bool)? in
+            // By file: a profile track's row can get a new local id while the player keeps the one it started with.
+            guard let state, case let .state(itemState) = state.1, let source = itemState.item.playbackData?.source, case let .telegramFile(fileReference, _, _) = source else {
+                return nil
+            }
+            let isPaused: Bool
+            switch itemState.status.status {
+            case .playing:
+                isPaused = false
+            case .paused:
+                isPaused = true
+            case let .buffering(_, whilePlaying, _, _):
+                isPaused = !whilePlaying
+            }
+            return (fileReference.media.fileId.id, isPaused)
+        }
+        |> distinctUntilChanged(isEqual: { $0?.0 == $1?.0 && $0?.1 == $1?.1 })
+        |> deliverOnMainQueue).start(next: { [weak self] value in
+            guard let self else {
+                return
+            }
+            self.playingTrack = value.map { (fileId: $0.0, isPaused: $0.1) }
+            self.updateList(allUpdated: true)
+        })
         self.libraryDisposable = (library.updated.signal()
         |> deliverOnMainQueue).start(next: { [weak self] _ in
             guard let self else {
@@ -317,6 +379,7 @@ final class MusicScreenNode: ASDisplayNode {
         self.playlistOwnerDisposable?.dispose()
         self.playlistCoverDisposable?.dispose()
         self.libraryDisposable?.dispose()
+        self.playingDisposable?.dispose()
         self.tabShownDisposable?.dispose()
         self.pickerDisposable?.dispose()
     }
@@ -397,9 +460,206 @@ final class MusicScreenNode: ASDisplayNode {
         return track.title.lowercased().contains(query) || (track.artist?.lowercased().contains(query) ?? false)
     }
 
+    /// Screens whose search switches scopes: every list under the navigation bar, outside of the track picker.
+    private var usesSearchScopes: Bool {
+        if self.picker != nil {
+            return false
+        }
+        if case .playlist = self.section {
+            return false
+        }
+        return true
+    }
+
+    private var isScopedSearchActive: Bool {
+        return self.usesSearchScopes && self.playlistSearchQuery != nil
+    }
+
+    /// The tab a search opens on: the section it was opened from.
+    private var defaultSearchScope: MusicSearchScope {
+        switch self.section {
+        case .hub, .playlist:
+            return .all
+        case .songs:
+            return .tracks
+        case .artists:
+            return .artists
+        case let .playlists(favoritesOnly):
+            return favoritesOnly ? .favorites : .playlists
+        case .favorites:
+            return .favorites
+        }
+    }
+
+    private func searchScopeTitle(_ scope: MusicSearchScope) -> String {
+        let strings = self.presentationData.strings
+        switch scope {
+        case .all:
+            return musicString(strings, ru: "Все", en: "All")
+        case .tracks:
+            return musicString(strings, ru: "Треки", en: "Tracks")
+        case .playlists:
+            return musicString(strings, ru: "Плейлисты", en: "Playlists")
+        case .artists:
+            return musicString(strings, ru: "Артисты", en: "Artists")
+        case .favorites:
+            return musicString(strings, ru: "Избранное", en: "Favorites")
+        }
+    }
+
+    private func searchCategoryTitle(_ category: MusicSearchCategory) -> String {
+        let strings = self.presentationData.strings
+        switch category {
+        case .playlists:
+            return musicString(strings, ru: "Плейлисты", en: "Playlists")
+        case .artists:
+            return musicString(strings, ru: "Артисты", en: "Artists")
+        case .tracks:
+            return musicString(strings, ru: "Треки", en: "Tracks")
+        }
+    }
+
+    /// The All tab's category whose header this is.
+    private func searchCategory(header title: String) -> MusicSearchCategory? {
+        guard self.isScopedSearchActive, self.searchScope == .all else {
+            return nil
+        }
+        return MusicSearchCategory.allCases.first(where: { self.searchCategoryTitle($0) == title })
+    }
+
+    /// `recent` in front, then the rest of `all`, keyed by `key`; recents no longer in the library are skipped.
+    private func recentsFirst<T, K: Hashable>(_ all: [T], recent: [K], key: (T) -> K?) -> [T] {
+        var byKey: [K: T] = [:]
+        for item in all {
+            if let itemKey = key(item), byKey[itemKey] == nil {
+                byKey[itemKey] = item
+            }
+        }
+        let recentItems = recent.compactMap { byKey[$0] }
+        let recentKeys = Set(recent)
+        return recentItems + all.filter { item in
+            return key(item).flatMap { !recentKeys.contains($0) } ?? true
+        }
+    }
+
+    private func toggleSearchCategory(_ category: MusicSearchCategory) {
+        if self.expandedSearchCategories.contains(category) {
+            self.expandedSearchCategories.remove(category)
+        } else {
+            self.expandedSearchCategories.insert(category)
+        }
+        // Headers change their action title, so every row is rebuilt.
+        self.updateList(allUpdated: true, animated: true)
+    }
+
+    private func searchScopePlaceholder() -> String {
+        let strings = self.presentationData.strings
+        switch self.searchScope {
+        case .all:
+            return strings.Common_Search
+        case .tracks:
+            return musicString(strings, ru: "Поиск треков", en: "Search Tracks")
+        case .playlists:
+            return musicString(strings, ru: "Поиск плейлистов", en: "Search Playlists")
+        case .artists:
+            return musicString(strings, ru: "Поиск артистов", en: "Search Artists")
+        case .favorites:
+            return musicString(strings, ru: "Поиск в избранном", en: "Search Favorites")
+        }
+    }
+
+    /// While searching only result rows are listed (Figma Search, 251:22733): All looks through playlists, artists and tracks
+    /// under their headers, Favorites through favorite playlists and tracks, every other tab only through its own section.
+    private func makeSearchEntries() -> [MusicListEntry] {
+        var contents: [(MusicListEntryId, MusicListEntryContent, String?)] = []
+        let strings = self.presentationData.strings
+        let query = self.activeSearchQuery
+        let matches: (String) -> Bool = { text in
+            return query.flatMap { text.lowercased().contains($0) } ?? true
+        }
+        let playlistsTitle = musicString(strings, ru: "Плейлисты", en: "Playlists")
+        let artistsTitle = musicString(strings, ru: "Артисты", en: "Artists")
+        let tracksTitle = musicString(strings, ru: "Треки", en: "Tracks")
+
+        let playlistSorting: MusicSorting
+        if case .playlists = self.section {
+            playlistSorting = self.sorting
+        } else {
+            playlistSorting = MusicSorting(key: .title, ascending: true)
+        }
+        let trackSorting = self.listsTracks ? self.sorting : MusicSorting(key: .dateAdded, ascending: false)
+
+        let appendPlaylists: (_ favoritesOnly: Bool, _ header: String?) -> Void = { favoritesOnly, header in
+            let playlists = self.library.playlists(sorting: playlistSorting).filter { playlist in
+                return (!favoritesOnly || playlist.isFavorite) && matches(playlist.title)
+            }
+            contents += playlists.map { playlist in
+                return (.playlist(playlist.id), .playlist(playlist, subtitle: musicPlaylistSubtitle(strings, playlist: playlist, library: self.library)), header)
+            }
+        }
+        let appendArtists: (_ header: String?) -> Void = { header in
+            contents += self.library.artists.filter { matches($0.name) }.map { artist in
+                return (.artist(artist.name.lowercased()), .artist(artist), header ?? musicIndexLetter(artist.name))
+            }
+        }
+        let appendTracks: (_ source: MusicTrackSource, _ header: String?) -> Void = { source, header in
+            let tracks = self.library.tracks(source: source, sorting: trackSorting).filter(self.matchesSearch)
+            self.currentTracks = tracks
+            contents += tracks.map { track in
+                return (.track(track.message.id), .track(track, isSelected: nil, isFavorite: self.library.isFavorite(track), isPicked: nil), header)
+            }
+        }
+
+        self.searchCategoriesWithMore.removeAll()
+        // Shows the first rows of a category; the header's Show More reveals the rest.
+        let limited: ([(MusicListEntryId, MusicListEntryContent, String?)], MusicSearchCategory) -> [(MusicListEntryId, MusicListEntryContent, String?)] = { rows, category in
+            guard rows.count > category.limit else {
+                return rows
+            }
+            self.searchCategoriesWithMore.insert(category)
+            return self.expandedSearchCategories.contains(category) ? rows : Array(rows.prefix(category.limit))
+        }
+
+        switch self.searchScope {
+        case .all:
+            // Recently opened results lead each category, then the rest of the library (Figma Music / Search, 291:16311).
+            let playlists = self.recentsFirst(self.library.playlists(sorting: playlistSorting), recent: self.library.recentSearchPlaylistIds, key: { $0.id }).filter { matches($0.title) }
+            contents += limited(playlists.map { playlist in
+                return (.playlist(playlist.id), .playlist(playlist, subtitle: musicPlaylistSubtitle(strings, playlist: playlist, library: self.library)), playlistsTitle)
+            }, .playlists)
+            let artists = self.recentsFirst(self.library.artists, recent: self.library.recentSearchArtists, key: { $0.name.lowercased() }).filter { matches($0.name) }
+            contents += limited(artists.map { artist in
+                return (.artist(artist.name.lowercased()), .artist(artist), artistsTitle)
+            }, .artists)
+            let allTracks = self.recentsFirst(self.library.tracks(source: .all, sorting: trackSorting), recent: self.library.recentSearchFileIds, key: { $0.file?.fileId.id }).filter(self.matchesSearch)
+            let trackRows = limited(allTracks.map { track in
+                return (.track(track.message.id), .track(track, isSelected: nil, isFavorite: self.library.isFavorite(track), isPicked: nil), tracksTitle)
+            }, .tracks)
+            self.currentTracks = Array(allTracks.prefix(trackRows.count))
+            contents += trackRows
+        case .favorites:
+            appendPlaylists(true, playlistsTitle)
+            appendTracks(.favorites, tracksTitle)
+        case .tracks:
+            if case let .songs(artist?) = self.section {
+                appendTracks(.artist(artist), nil)
+            } else {
+                appendTracks(.all, nil)
+            }
+        case .playlists:
+            appendPlaylists(false, nil)
+        case .artists:
+            appendArtists(nil)
+        }
+        return contents.enumerated().map { MusicListEntry(index: $0.offset, stableId: $0.element.0, content: $0.element.1, letter: $0.element.2) }
+    }
+
     private func makeEntries() -> [MusicListEntry] {
         var contents: [(MusicListEntryId, MusicListEntryContent, String?)] = []
         self.currentTracks = []
+        if self.isScopedSearchActive {
+            return self.makeSearchEntries()
+        }
         let trackContent: (MusicTrack) -> MusicListEntryContent = { track in
             return .track(
                 track,
@@ -511,7 +771,33 @@ final class MusicScreenNode: ASDisplayNode {
             picker.toggle(track)
             return
         }
-        self.controller?.play(track: track, tracks: self.currentTracks, library: self.library)
+        if self.isScopedSearchActive {
+            self.library.noteSearched(track: track)
+        }
+        self.controller?.play(track: track, tracks: self.currentTracks, library: self.library, source: self.queueSource())
+    }
+
+    /// The list a queue started here follows as the library changes: the section's tracks in its sorting, without the
+    /// search. A queue started from search results, or from a list with no such source, keeps its tracks.
+    private func queueSource() -> (() -> [MusicTrack]?)? {
+        let full = self.queueSourceTracks()
+        guard let full, full.count == self.currentTracks.count else {
+            return nil
+        }
+        return { [weak self] in
+            return self?.queueSourceTracks()
+        }
+    }
+
+    private func queueSourceTracks() -> [MusicTrack]? {
+        switch self.section {
+        case .hub:
+            return self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false))
+        case .songs, .favorites:
+            return self.library.tracks(source: self.trackSource, sorting: self.sorting)
+        default:
+            return nil
+        }
     }
 
     // MARK: Selection
@@ -721,13 +1007,14 @@ final class MusicScreenNode: ASDisplayNode {
         }
 
         let isFavorite = library.isFavorite(track)
+        let isSavedToProfile = library.isSavedToProfile(track)
         var items: [ContextMenuItem] = [
             .custom(MusicTrackActionsContextItem(actions: [
                 MusicTrackActionsContextItem.Action(
-                    title: track.isSaved ? musicString(strings, ru: "Из профиля", en: "Unpin") : musicString(strings, ru: "В профиль", en: "To Profile"),
-                    iconName: "Peer Info/SaveMusic",
+                    title: isSavedToProfile ? musicString(strings, ru: "Убрать", en: "Remove") : musicString(strings, ru: "В профиль", en: "To Profile"),
+                    iconName: isSavedToProfile ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic",
                     action: { [weak self] in
-                        self?.controller?.setSavedToProfile(track: track, isSaved: !track.isSaved, library: library)
+                        self?.controller?.setSavedToProfile(track: track, isSaved: !isSavedToProfile, library: library)
                     }
                 ),
                 MusicTrackActionsContextItem.Action(
@@ -923,9 +1210,13 @@ final class MusicScreenNode: ASDisplayNode {
             }
         }
         let trailingIcon = isFavorite && isPicked == nil && isSelected == nil ? MusicResources.favoriteMark(theme: presentationData.theme) : nil
+        var playingIndicator: ListMessageItemPlayingIndicator?
+        if isPicked == nil, let playingTrack = self.playingTrack, track.file?.fileId.id == playingTrack.fileId {
+            playingIndicator = playingTrack.isPaused ? .paused : .playing
+        }
         // Play and Shuffle keep the space above the first track; a letter further down follows the previous row directly (Figma Songs / Sort).
         let blockTopInset: CGFloat = 0.0
-        return ListMessageItem(presentationData: chatPresentationData, systemStyle: .glass, context: self.context, chatLocation: .peer(id: message.id.peerId), interaction: interaction, message: message, selection: selection, selectionSide: .left, displayHeader: false, customHeader: header, isGlobalSearchResult: !track.isSaved, isSavedMusic: track.isSaved, displayFileInfo: true, audioInfo: .performer, hidesAudioFileExtension: true, additionalSideInset: 0.0, blockTopInset: blockTopInset, displayBackground: false, leftRevealOptions: revealOptions.left, rightRevealOptions: revealOptions.right, trailingIcon: trailingIcon, editControl: editControl, displaysAudioCover: true, style: .plain, sectionId: sectionId)
+        return ListMessageItem(presentationData: chatPresentationData, systemStyle: .glass, context: self.context, chatLocation: .peer(id: message.id.peerId), interaction: interaction, message: message, selection: selection, selectionSide: .left, displayHeader: false, customHeader: header, isGlobalSearchResult: !track.isSaved, isSavedMusic: track.isSaved, displayFileInfo: true, audioInfo: .performer, hidesAudioFileExtension: true, additionalSideInset: 0.0, blockTopInset: blockTopInset, displayBackground: false, leftRevealOptions: revealOptions.left, rightRevealOptions: revealOptions.right, trailingIcon: trailingIcon, editControl: editControl, displaysAudioCover: true, playingIndicator: playingIndicator, style: .plain, sectionId: sectionId)
     }
 
     private func nameRowItem(id: String, name: String, subtitle: String? = nil, isFavorite: Bool = false, isLarge: Bool = false, isMedium: Bool = false, cover: TelegramMediaImageRepresentation? = nil, header: ListViewItemHeader?, contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = nil, action: @escaping () -> Void) -> ListViewItem {
@@ -1063,7 +1354,7 @@ final class MusicScreenNode: ASDisplayNode {
         guard let first = tracks.first else {
             return
         }
-        self.controller?.play(track: first, tracks: tracks, library: self.library)
+        self.controller?.play(track: first, tracks: tracks, library: self.library, source: shuffled ? nil : self.queueSource())
     }
 
     private func presentContextMenu(playlist: MusicPlaylist, node: ASDisplayNode, gesture: ContextGesture?) {
@@ -1083,8 +1374,8 @@ final class MusicScreenNode: ASDisplayNode {
         let items: [ContextMenuItem] = [
             .custom(MusicTrackActionsContextItem(actions: [
                 MusicTrackActionsContextItem.Action(
-                    title: playlist.isInProfile ? musicString(strings, ru: "Из профиля", en: "Unpin") : musicString(strings, ru: "В профиль", en: "To Profile"),
-                    iconName: "Peer Info/SaveMusic",
+                    title: playlist.isInProfile ? musicString(strings, ru: "Убрать", en: "Remove") : musicString(strings, ru: "В профиль", en: "To Profile"),
+                    iconName: playlist.isInProfile ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic",
                     action: { [weak controller] in
                         controller?.setInProfile(playlist: playlist, isInProfile: !playlist.isInProfile, library: library)
                     }
@@ -1137,7 +1428,16 @@ final class MusicScreenNode: ASDisplayNode {
     private func item(entry: MusicListEntry) -> ListViewItem {
         var header: ListViewItemHeader?
         if let letter = entry.letter {
-            header = ChatListSearchItemHeader(type: .text(letter, AnyHashable(letter)), theme: self.presentationData.theme, strings: self.presentationData.strings)
+            var actionTitle: String?
+            var action: ((ASDisplayNode) -> Void)?
+            if let category = self.searchCategory(header: letter), self.searchCategoriesWithMore.contains(category) {
+                let strings = self.presentationData.strings
+                actionTitle = self.expandedSearchCategories.contains(category) ? strings.ChatList_Search_ShowLess : strings.ChatList_Search_ShowMore
+                action = { [weak self] _ in
+                    self?.toggleSearchCategory(category)
+                }
+            }
+            header = ChatListSearchItemHeader(type: .text(letter, AnyHashable(letter)), theme: self.presentationData.theme, strings: self.presentationData.strings, actionTitle: actionTitle, action: action)
         }
         switch entry.content {
         case let .tabSwitch(isOn):
@@ -1165,6 +1465,9 @@ final class MusicScreenNode: ASDisplayNode {
                 guard let self else {
                     return
                 }
+                if self.isScopedSearchActive {
+                    self.library.noteSearched(artist: artist)
+                }
                 self.controller?.open(section: .songs(artist: artist.name), library: self.library)
             })
         case let .playlist(playlist, subtitle):
@@ -1174,9 +1477,12 @@ final class MusicScreenNode: ASDisplayNode {
                 }
                 self.presentContextMenu(playlist: playlist, node: node, gesture: gesture)
             } : nil
-            return self.nameRowItem(id: "\(playlist.id)", name: playlist.title, subtitle: subtitle, isFavorite: playlist.isFavorite, isLarge: true, cover: playlist.cover, header: nil, contextAction: contextAction, action: { [weak self] in
+            return self.nameRowItem(id: "\(playlist.id)", name: playlist.title, subtitle: subtitle, isFavorite: playlist.isFavorite, isLarge: true, cover: playlist.cover, header: header, contextAction: contextAction, action: { [weak self] in
                 guard let self else {
                     return
+                }
+                if self.isScopedSearchActive {
+                    self.library.noteSearched(playlist: playlist)
                 }
                 self.controller?.open(section: .playlist(playlist.id), library: self.library)
             })
@@ -1218,7 +1524,9 @@ final class MusicScreenNode: ASDisplayNode {
             return
         }
         var sections: [String] = []
-        for entry in self.entries {
+        // In search only the Artists tab keeps its letters; the other tabs' headers name categories.
+        let hasIndex = !self.isScopedSearchActive || self.searchScope == .artists
+        for entry in self.entries where hasIndex {
             if let letter = entry.letter, !sections.contains(letter) {
                 sections.append(letter)
             }
@@ -1675,6 +1983,10 @@ final class MusicScreenNode: ASDisplayNode {
         if self.isSelecting && self.controller?.mode == .navigation {
             insets.bottom = self.selectionPanelBottomInset(layout: layout) + MusicScreenNode.selectionPanelHeight + 8.0
         }
+        if let filtersFrame = self.updateSearchFilters(layout: layout, transition: transition) {
+            // The last results stay clear of the scope tabs.
+            insets.bottom = max(insets.bottom, layout.size.height - filtersFrame.minY + 8.0)
+        }
         transition.updateFrame(node: self.listNode, frame: CGRect(origin: CGPoint(), size: layout.size))
         let (duration, curve) = listViewAnimationDurationAndCurve(transition: transition)
         self.listNode.transaction(deleteIndices: [], insertIndicesAndItems: [], updateIndicesAndItems: [], options: [.Synchronous, .LowLatency], updateSizeAndInsets: ListViewUpdateSizeAndInsets(size: layout.size, insets: insets, duration: duration, curve: curve), updateOpaqueState: nil)
@@ -1883,6 +2195,8 @@ final class MusicScreenNode: ASDisplayNode {
             self.view.endEditing(true)
         }
         self.playlistSearchQuery = isActive ? "" : nil
+        self.searchScope = self.defaultSearchScope
+        self.expandedSearchCategories.removeAll()
         self.updateList(allUpdated: true, scrollToTop: true, animated: true)
         self.containerLayoutUpdated(layout, transition: .animated(duration: 0.4, curve: .spring))
         if isActive, let panelView = self.playlistSearchPanel?.view as? SearchInputPanelComponent.View {
@@ -1898,6 +2212,99 @@ final class MusicScreenNode: ASDisplayNode {
         return 16.0
     }
 
+    /// The scope tabs' frame: the chat list search's filter bar metrics, 8 pt above the keyboard,
+    /// or concentric with the screen corner when the keyboard is down.
+    private func searchFiltersFrame(layout: ContainerViewLayout) -> CGRect {
+        let bottomInset = layout.insets(options: [.input]).bottom
+        var filtersInsets = UIEdgeInsets(top: 0.0, left: 12.0, bottom: bottomInset, right: 12.0)
+        if filtersInsets.bottom == 84.0 {
+            filtersInsets.bottom -= 6.0
+        }
+        if bottomInset <= 30.0 {
+            filtersInsets = ContainerViewLayout.concentricInsets(bottomInset: bottomInset, innerDiameter: 40.0, sideInset: 32.0)
+        } else if bottomInset <= 84.0 {
+            filtersInsets.left = 20.0
+            filtersInsets.right = filtersInsets.left
+        } else {
+            if let inputHeight = layout.inputHeight, filtersInsets.bottom == inputHeight {
+                filtersInsets.bottom += 8.0
+            }
+            filtersInsets.bottom = max(8.0, filtersInsets.bottom)
+        }
+        let height: CGFloat = 40.0
+        let minY = layout.size.height - filtersInsets.bottom - height
+        let sideInsets = layout.sideInsets(forBandFrom: minY, to: minY + height)
+        let left = sideInsets.left + filtersInsets.left
+        let right = sideInsets.right + filtersInsets.right
+        return CGRect(origin: CGPoint(x: left, y: minY), size: CGSize(width: layout.size.width - left - right, height: height))
+    }
+
+    /// Shows the scope tabs while a scoped search is open; returns their frame.
+    @discardableResult
+    private func updateSearchFilters(layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) -> CGRect? {
+        guard self.isScopedSearchActive else {
+            if let searchFiltersNode = self.searchFiltersNode {
+                self.searchFiltersNode = nil
+                if transition.isAnimated {
+                    transition.updateAlpha(node: searchFiltersNode, alpha: 0.0, completion: { [weak searchFiltersNode] _ in
+                        searchFiltersNode?.removeFromSupernode()
+                    })
+                } else {
+                    searchFiltersNode.removeFromSupernode()
+                }
+            }
+            return nil
+        }
+        let frame = self.searchFiltersFrame(layout: layout)
+        let searchFiltersNode: ChatListSearchFiltersContainerNode
+        var nodeTransition = transition
+        if let current = self.searchFiltersNode {
+            searchFiltersNode = current
+        } else {
+            nodeTransition = .immediate
+            searchFiltersNode = ChatListSearchFiltersContainerNode()
+            searchFiltersNode.customFilterPressed = { [weak self] id in
+                guard let self, let scope = MusicSearchScope(rawValue: id) else {
+                    return
+                }
+                self.selectSearchScope(scope)
+            }
+            self.searchFiltersNode = searchFiltersNode
+            self.addSubnode(searchFiltersNode)
+            searchFiltersNode.frame = frame
+            if transition.isAnimated {
+                searchFiltersNode.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
+            }
+        }
+        nodeTransition.updateFrame(node: searchFiltersNode, frame: frame)
+        self.updateSearchFiltersContent(size: frame.size, transition: nodeTransition)
+        return frame
+    }
+
+    private func updateSearchFiltersContent(size: CGSize, transition: ContainedViewLayoutTransition) {
+        guard let searchFiltersNode = self.searchFiltersNode else {
+            return
+        }
+        let filters = MusicSearchScope.allCases.map { scope -> ChatListSearchFilterEntry in
+            return .custom(id: scope.rawValue, title: self.searchScopeTitle(scope))
+        }
+        searchFiltersNode.update(size: size, sideInset: 0.0, filters: filters, displayGlobalPostsNewBadge: false, selectedFilter: .custom(self.searchScope.rawValue), transitionFraction: 0.0, presentationData: self.presentationData, transition: transition)
+    }
+
+    private func selectSearchScope(_ scope: MusicSearchScope) {
+        guard self.searchScope != scope, let layout = self.validLayout else {
+            return
+        }
+        self.searchScope = scope
+        self.expandedSearchCategories.removeAll()
+        if let searchBarNode = self.searchBarNode {
+            let searchBarTheme = SearchBarNodeTheme(theme: self.presentationData.theme, hasSeparator: false)
+            searchBarNode.placeholderString = NSAttributedString(string: self.searchScopePlaceholder(), font: Font.regular(17.0), textColor: searchBarTheme.placeholder)
+        }
+        self.updateSearchFiltersContent(size: self.searchFiltersFrame(layout: layout).size, transition: .animated(duration: 0.4, curve: .spring))
+        self.updateList(scrollToTop: true)
+    }
+
     /// Returns the search bar that has just closed; the caller folds it once the bar is laid out.
     private func updateSearchBar(layout: ContainerViewLayout, navigationHeight: CGFloat, transition: ComponentTransition) -> SearchBarNode? {
         let placeholderNode = (self.navigationBarView.view as? ChatListNavigationBar.View)?.searchContentNode?.placeholderNode
@@ -1911,7 +2318,7 @@ final class MusicScreenNode: ASDisplayNode {
                 let theme = self.presentationData.theme
                 let searchBarTheme = SearchBarNodeTheme(theme: theme, hasSeparator: false)
                 searchBarNode = SearchBarNode(theme: searchBarTheme, presentationTheme: theme, strings: self.presentationData.strings, fieldStyle: .glass, displayBackground: false)
-                searchBarNode.placeholderString = NSAttributedString(string: self.searchPlaceholder() ?? self.presentationData.strings.Common_Search, font: Font.regular(17.0), textColor: searchBarTheme.placeholder)
+                searchBarNode.placeholderString = NSAttributedString(string: self.usesSearchScopes ? self.searchScopePlaceholder() : (self.searchPlaceholder() ?? self.presentationData.strings.Common_Search), font: Font.regular(17.0), textColor: searchBarTheme.placeholder)
                 self.searchBarNode = searchBarNode
                 searchBarNode.cancel = { [weak self] in
                     self?.setPlaylistSearchActive(false)

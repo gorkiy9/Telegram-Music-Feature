@@ -126,6 +126,8 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let editControl: ListMessageItemEditControl?
     /// A music track shows its cover alone in place of the play button: the row itself plays it.
     let displaysAudioCover: Bool
+    /// The track the player is on: its cover shows the sound wave overlay.
+    let playingIndicator: ListMessageItemPlayingIndicator?
     let style: ItemListStyle
     
     let header: ListViewItemHeader?
@@ -180,6 +182,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         trailingIcon: UIImage? = nil,
         editControl: ListMessageItemEditControl? = nil,
         displaysAudioCover: Bool = false,
+        playingIndicator: ListMessageItemPlayingIndicator? = nil,
         style: ItemListStyle = .plain,
         sectionId: ItemListSectionId = 0
     ) {
@@ -221,6 +224,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.trailingIcon = trailingIcon
         self.editControl = editControl
         self.displaysAudioCover = displaysAudioCover
+        self.playingIndicator = playingIndicator
         self.style = style
         self.sectionId = sectionId
     }

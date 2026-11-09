@@ -357,8 +357,8 @@ private struct MusicPlaylistEditState: Equatable {
 
 /// Creating a playlist, and editing one: the name and photo card, a description and the tracks, as a channel is created.
 /// The result is kept in the library's memory: the API has no playlists.
-func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, playlist: MusicPlaylist?, completion: @escaping (MusicPlaylist) -> Void) -> ViewController {
-    let initialState = MusicPlaylistEditState(title: playlist?.title ?? "", description: playlist?.description ?? "", trackIds: playlist?.trackIds ?? [], cover: playlist?.cover)
+func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, playlist: MusicPlaylist?, initialTrackIds: [EngineMessage.Id] = [], completion: @escaping (MusicPlaylist) -> Void) -> ViewController {
+    let initialState = MusicPlaylistEditState(title: playlist?.title ?? "", description: playlist?.description ?? "", trackIds: playlist?.trackIds ?? initialTrackIds, cover: playlist?.cover)
     let statePromise = ValuePromise(initialState, ignoreRepeated: true)
     let stateValue = Atomic(value: initialState)
     let updateState: ((MusicPlaylistEditState) -> MusicPlaylistEditState) -> Void = { f in

@@ -514,6 +514,7 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
                         background: ButtonComponent.Background(style: .actualGlass, color: accent, foreground: playForeground, pressedColor: accent, cornerRadius: buttonSize.height * 0.5),
                         content: MusicPlaybackButtonsItemNode.content(icon: "GlobalMusicPlayer/Play", iconSize: CGSize(width: 24.0, height: 24.0), title: item.playTitle, color: playForeground, spacing: 3.0),
                         action: { [weak strongSelf] in
+                            MusicButtonIconAnimation.bounce(in: strongSelf?.playButton.view)
                             strongSelf?.item?.action(false)
                         }
                     )),
@@ -529,6 +530,7 @@ final class MusicPlaybackButtonsItemNode: ListViewItemNode {
                         background: ButtonComponent.Background(style: .actualGlass, color: shuffleGlass, foreground: shuffleForeground, pressedColor: shuffleGlass, cornerRadius: buttonSize.height * 0.5),
                         content: MusicPlaybackButtonsItemNode.content(icon: "Music/Shuffle", iconSize: CGSize(width: 24.0, height: 24.0), title: item.shuffleTitle, color: shuffleForeground, spacing: 4.0),
                         action: { [weak strongSelf] in
+                            MusicButtonIconAnimation.bounce(in: strongSelf?.shuffleButton.view)
                             strongSelf?.item?.action(true)
                         }
                     )),
