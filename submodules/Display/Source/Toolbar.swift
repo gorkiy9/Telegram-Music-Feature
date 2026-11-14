@@ -19,6 +19,15 @@ public struct ToolbarAction: Equatable {
         self.color = color
         self.icon = icon
     }
+
+    /// The colour a toolbar draws the title in instead of its own: the custom colour while the action is enabled; a
+    /// disabled action looks like any other.
+    public var customTitleColor: UIColor? {
+        guard self.isEnabled, case let .custom(color) = self.color else {
+            return nil
+        }
+        return color
+    }
 }
 
 public struct Toolbar: Equatable {
