@@ -1,5 +1,4 @@
 import Foundation
-import LottieSettings
 import UIKit
 import AsyncDisplayKit
 import Display
@@ -165,7 +164,7 @@ public class ChatMessageMusicPlaylistBubbleContentNode: ChatMessageBubbleContent
     private var playingDisposable: Disposable?
     private var playingTrack: (fileId: Int64, isPaused: Bool)?
 
-    required public init(lottieSettings: LottieRenderingSettings) {
+    required public init() {
         self.coverNode = TransformImageNode()
         self.shadeContainerView = UIView()
         self.shadeContainerView.isUserInteractionEnabled = false
@@ -180,7 +179,7 @@ public class ChatMessageMusicPlaylistBubbleContentNode: ChatMessageBubbleContent
         self.showAllButtonNode = ChatMessageAttachedContentButtonNode()
         self.dateAndStatusNode = ChatMessageDateAndStatusNode()
 
-        super.init(lottieSettings: lottieSettings)
+        super.init()
 
         self.addSubnode(self.coverNode)
         self.addSubnode(self.titleNode)
@@ -729,12 +728,12 @@ public class ChatMessageMusicGroupShowAllBubbleContentNode: ChatMessageBubbleCon
     private let buttonNode: ChatMessageAttachedContentButtonNode
     private let dateAndStatusNode: ChatMessageDateAndStatusNode
 
-    required public init(lottieSettings: LottieRenderingSettings) {
+    required public init() {
         self.separatorNode = ASDisplayNode()
         self.buttonNode = ChatMessageAttachedContentButtonNode()
         self.dateAndStatusNode = ChatMessageDateAndStatusNode()
 
-        super.init(lottieSettings: lottieSettings)
+        super.init()
 
         self.addSubnode(self.separatorNode)
         self.addSubnode(self.buttonNode)

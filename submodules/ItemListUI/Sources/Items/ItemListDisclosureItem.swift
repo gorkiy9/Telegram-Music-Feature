@@ -11,7 +11,6 @@ import AccountContext
 import TextNodeWithEntities
 import ListItemComponentAdaptor
 import ManagedAnimationNode
-import LottieSettings
 
 private let avatarFont = avatarPlaceholderFont(size: 16.0)
 
@@ -377,7 +376,7 @@ public class ItemListDisclosureItemNode: ListViewItemNode, ItemListItemNode {
             }
         } else {
             self.iconAnimationNode?.removeFromSupernode()
-            animationNode = SimpleAnimationNode(animationName: iconAnimation.name, size: iconAnimation.size, lottieSettings: .noAccountFallback)
+            animationNode = SimpleAnimationNode(animationName: iconAnimation.name, size: iconAnimation.size)
             animationNode.isUserInteractionEnabled = false
             // A row that appears later shows the finished glyph rather than replaying it.
             animationNode.seekToEnd(immediately: true)

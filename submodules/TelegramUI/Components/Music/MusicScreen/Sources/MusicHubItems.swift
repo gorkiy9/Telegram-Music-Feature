@@ -264,7 +264,7 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
             }
         } else {
             self.animationNode?.removeFromSupernode()
-            animationNode = SimpleAnimationNode(animationName: tile.animation, replaceColors: [0xffffff: palette.foreground.argb & 0xffffff], size: animationSize, lottieSettings: .noAccountFallback)
+            animationNode = SimpleAnimationNode(animationName: tile.animation, replaceColors: [0xffffff: palette.foreground.argb & 0xffffff], size: animationSize)
             animationNode.isUserInteractionEnabled = false
             animationNode.seekToEnd(immediately: true)
             self.animationNode = animationNode
