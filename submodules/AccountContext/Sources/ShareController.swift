@@ -182,6 +182,7 @@ public final class ShareControllerParams {
     public let onMediaTimestampLinkCopied: ((Int32?) -> Void)?
     public weak var parentNavigationController: NavigationController?
     public let canSendInHighQuality: Bool
+    public let hidesSenderNames: Bool
 
     public init(
         subject: ShareControllerSubject,
@@ -206,7 +207,8 @@ public final class ShareControllerParams {
         debugAction: (() -> Void)? = nil,
         onMediaTimestampLinkCopied: ((Int32?) -> Void)? = nil,
         parentNavigationController: NavigationController? = nil,
-        canSendInHighQuality: Bool = false
+        canSendInHighQuality: Bool = false,
+        hidesSenderNames: Bool = false
     ) {
         self.subject = subject
         self.presetText = presetText
@@ -231,5 +233,6 @@ public final class ShareControllerParams {
         self.onMediaTimestampLinkCopied = onMediaTimestampLinkCopied
         self.parentNavigationController = parentNavigationController
         self.canSendInHighQuality = canSendInHighQuality
+        self.hidesSenderNames = hidesSenderNames
     }
 }

@@ -561,7 +561,8 @@ private final class ItemView: UIView, SparseItemGridView {
             selection: isSelected.flatMap { isSelected in
                 return .selectable(selected: isSelected, num: nil)
             } ?? .none,
-            displayHeader: false
+            displayHeader: false,
+            showsMusicLibraryMark: true
         )
         self.messageItem = messageItem
 

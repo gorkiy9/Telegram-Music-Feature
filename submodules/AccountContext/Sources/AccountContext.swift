@@ -1734,6 +1734,49 @@ public protocol SharedAccountContext: AnyObject {
         
     func switchToAccount(id: AccountRecordId, fromSettingsController settingsController: ViewController?, withChatListController chatListController: ViewController?)
     func beginNewAuth(testingEnvironment: Bool)
+    
+    /// Music section concept: what a playlist shared into a chat asks of the Music section.
+    func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction)
+    /// Music section concept: Show All of a group of tracks in a chat, every track of the group in a sheet.
+    func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage])
+    /// Music section concept: puts the tracks in Music (on this device, the profile is not touched) and shows a toast.
+    func addMusicTracksToLibrary(context: AccountContext, messages: [EngineRawMessage])
+    /// Music section concept: the files in Music, now and after every change (main queue).
+    func musicLibraryFileIds(context: AccountContext) -> Signal<Set<Int64>, NoError>
+    /// Music section concept: whether the file is in Music; safe off the main queue.
+    func musicLibraryContainsFile(context: AccountContext, fileId: Int64) -> Bool
+}
+
+/// Local flag of the Music section concept: the tab, the Settings row, and everything it changes in chats.
+public let isMusicSectionEnabled = true
+
+/// Music section concept: the actions of a playlist bubble in a chat.
+public enum MusicSharedPlaylistAction {
+    /// The playlist's own screen in a sheet.
+    case open
+    case play(shuffled: Bool)
+    /// Plays the playlist from its track with this file id.
+    case playTrack(fileId: Int64)
+    case menu(sourceView: UIView)
+}
+
+public extension SharedAccountContext {
+    func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction) {
+    }
+
+    func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage]) {
+    }
+
+    func addMusicTracksToLibrary(context: AccountContext, messages: [EngineRawMessage]) {
+    }
+
+    func musicLibraryFileIds(context: AccountContext) -> Signal<Set<Int64>, NoError> {
+        return .single(Set())
+    }
+
+    func musicLibraryContainsFile(context: AccountContext, fileId: Int64) -> Bool {
+        return false
+    }
 }
 
 public protocol ComposeController: ViewController {

@@ -175,6 +175,16 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     private let playPauseIconNode: PlayPauseIconNode
     
     private(set) var currentOrder: MusicPlaybackSettingsOrder?
+    /// The compact sheet's Shuffle, when its owner handles it: Shuffle then mixes the queue instead of the order setting.
+    var requestShuffle: (() -> Void)?
+    /// Lights the compact Shuffle while the queue itself is shuffled; nil follows the order setting.
+    var isQueueShuffled: Bool? {
+        didSet {
+            if self.isQueueShuffled != oldValue, let order = self.currentOrder {
+                self.updateOrderButton(order)
+            }
+        }
+    }
     private let orderButton: IconButtonNode
     
     private var currentLooping: MusicPlaybackSettingsLooping?
@@ -915,7 +925,8 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     private func updateOrderButton(_ order: MusicPlaybackSettingsOrder) {
         if self.isCompact {
             // The sheet's left button is Shuffle only: accent while the order is random.
-            self.orderButton.icon = generateTintedImage(image: UIImage(bundleImageName: "GlobalMusicPlayer/OrderRandom"), color: order == .random ? self.presentationData.theme.list.itemAccentColor : self.presentationData.theme.list.itemSecondaryTextColor)
+            let isActive = order == .random || self.isQueueShuffled == true
+            self.orderButton.icon = generateTintedImage(image: UIImage(bundleImageName: "GlobalMusicPlayer/OrderRandom"), color: isActive ? self.presentationData.theme.list.itemAccentColor : self.presentationData.theme.list.itemSecondaryTextColor)
             return
         }
         switch order {
@@ -1412,6 +1423,10 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
     }
     
     @objc func orderPressed() {
+        if self.isCompact, let requestShuffle = self.requestShuffle {
+            requestShuffle()
+            return
+        }
         if let order = self.currentOrder {
             var nextOrder: MusicPlaybackSettingsOrder
             switch order {

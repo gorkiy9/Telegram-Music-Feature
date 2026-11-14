@@ -121,6 +121,7 @@ import UrlWhitelist
 import SideColumnLayout
 import NavigationBarNode
 import NavigationExpansionTransition
+import MusicScreen
 
 public enum PeerInfoAvatarEditingMode {
     case generic
@@ -275,6 +276,7 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
     let navigationActionDisposable = MetaDisposable()
     let enqueueMediaMessageDisposable = MetaDisposable()
     private let openSavedMusicDisposable = MetaDisposable()
+    private var ownProfileMusicDisposable: Disposable?
     
     private(set) var validLayout: (ContainerViewLayout, CGFloat)?
     /// While an expansion has the profile's views they are held still: layouts wait, and the last one is applied when
@@ -870,6 +872,25 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
                         let presentationData = context.sharedContext.currentPresentationData.with { $0 }
                         self?.controller?.present(UndoOverlayController(presentationData: presentationData, content: .linkCopied(title: nil, text: presentationData.strings.Conversation_LinkCopied), elevatedLayout: false, animateInAsReplacement: false, action: { _ in return false }), in: .current)
                     })))
+                }
+                
+                // Music section concept: a chat's track goes to the profile or to Music from here as well.
+                if !(message.isCopyProtected() || isCopyProtected), message.media.contains(where: { ($0 as? TelegramMediaFile)?.isMusic == true }), let file = message.media.first(where: { $0 is TelegramMediaFile }) as? TelegramMediaFile {
+                    let strings = strongSelf.presentationData.strings
+                    if !MusicPlayerSupport.isSavedToProfile(context: context, fileId: file.fileId.id) {
+                        items.append(.action(ContextMenuActionItem(text: strings.Music_AddToProfile, icon: { theme in generateTintedImage(image: UIImage(bundleImageName: "Music/AddToProfile"), color: theme.contextMenu.primaryColor) }, action: { c, _ in
+                            c?.dismiss(completion: {
+                                MusicPlayerSupport.addToProfile(context: context, message: message)
+                            })
+                        })))
+                    }
+                    if !MusicPlayerSupport.libraryContainsFile(context: context, fileId: file.fileId.id) {
+                        items.append(.action(ContextMenuActionItem(text: strings.Music_AddToMusic, icon: { theme in generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/AddMusic"), color: theme.contextMenu.primaryColor) }, action: { c, _ in
+                            c?.dismiss(completion: {
+                                context.sharedContext.addMusicTracksToLibrary(context: context, messages: [message])
+                            })
+                        })))
+                    }
                 }
                 
                 if message.isCopyProtected() || isCopyProtected {
@@ -1542,6 +1563,20 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
         
         self.headerNode.displaySavedMusic = { [weak self] in
             self?.displaySavedMusic()
+        }
+        if isMusicSectionEnabled && ((isMyProfile && peerId == context.account.peerId) || (peerId != context.account.peerId && MusicProfileSupport.hasLocalProfileMusic(context: context, peerId: peerId))) {
+            // The own profile's music row names the last track or playlist put in the profile (Music section); the
+            // local test user's names its mock music.
+            self.ownProfileMusicDisposable = (MusicProfileSupport.summary(context: context, peerId: peerId)
+            |> deliverOnMainQueue).startStrict(next: { [weak self] summary in
+                guard let self else {
+                    return
+                }
+                self.headerNode.ownProfileMusicSummary = summary
+                if let (layout, navigationHeight) = self.validLayout {
+                    self.containerLayoutUpdated(layout: layout, navigationHeight: navigationHeight, transition: .immediate)
+                }
+            })
         }
 
         self.headerNode.openWallet = { [weak self] in
@@ -2705,6 +2740,7 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
         self.navigationActionDisposable.dispose()
         self.enqueueMediaMessageDisposable.dispose()
         self.openSavedMusicDisposable.dispose()
+        self.ownProfileMusicDisposable?.dispose()
         self.supportPeerDisposable.dispose()
         self.tipsPeerDisposable.dispose()
         self.shareStatusDisposable?.dispose()
@@ -3108,6 +3144,12 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
 
     var previousSavedMusicTimestamp: Double?
     private func displaySavedMusic() {
+        if isMusicSectionEnabled {
+            // The row opens the profile's music (tracks, and the own profile's playlists) instead of playing it.
+            let peerName = self.data?.peer.flatMap { $0.compactDisplayTitle }
+            self.controller?.push(MusicProfileSupport.profileScreen(context: self.context, peerId: self.peerId, peerName: peerName, savedMusicContext: self.data?.savedMusicContext))
+            return
+        }
         guard let savedMusicContext = self.data?.savedMusicContext else {
             return
         }
@@ -5938,6 +5980,8 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, PeerInfoScreenNodePro
                             }))
                         })
                    }
+                }, cancelSelection: { [weak self] in
+                    self?.performNavigationButtonAction?(.selectionDone, nil, nil)
                 })
                 self.paneContainerNode.selectionPanelNode = selectionPanelNode
                 self.paneContainerNode.addSubnode(selectionPanelNode)

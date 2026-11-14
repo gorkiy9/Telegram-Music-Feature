@@ -236,6 +236,21 @@ public final class NavigationExpansionRendererImpl: NavigationExpansionRenderer 
             let center = CGPoint(x: above.sourceCenter.x, y: above.sourceCenter.y + (above.sourceSize.height + size.height) * 0.5)
             labels.append(ExpansionLabelGeometry(sourceCenter: center, sourceSize: size, destinationCenter: destinationLabel.screenCenter, destinationSize: destinationLabel.textSize, photoCenter: destinationLabel.screenCenter, photoSize: destinationLabel.textSize))
         }
+        // A label the upper screen does not show (a chat's status line over a profile with only its title) goes to where
+        // it would stand there: under the label above it, at that label's scale, and fades out as the labels cross. Every
+        // label host needs its geometry, or the frames have fewer labels than the hosts that read them.
+        if labels.count < sourceLoan.labels.count {
+            for index in labels.count ..< sourceLoan.labels.count {
+                guard let above = labels.last else {
+                    break
+                }
+                let sourceLabel = sourceLoan.labels[index]
+                let scale = above.destinationSize.height / max(1.0, above.sourceSize.height)
+                let size = CGSize(width: sourceLabel.textSize.width * scale, height: sourceLabel.textSize.height * scale)
+                let center = CGPoint(x: above.destinationCenter.x, y: above.destinationCenter.y + (above.destinationSize.height + size.height) * 0.5)
+                labels.append(ExpansionLabelGeometry(sourceCenter: sourceLabel.screenCenter, sourceSize: sourceLabel.textSize, destinationCenter: center, destinationSize: size, photoCenter: center, photoSize: size))
+            }
+        }
         var geometry = ExpansionGeometry(screenSize: size, screenCornerRadii: destinationLoan.screenCornerRadii, origin: sourceLoan.origin, companion: sourceLoan.companion, companionPhotoDiameter: sourceLoan.companionPhotoDiameter, avatar: destinationLoan.avatar, photo: destinationLoan.photo, labels: labels, carriedEdge: destinationLoan.carriedEdge, appearing: destinationLoan.appearingViews.map { $0.convert($0.bounds, to: screen) })
         if let backgroundOpening = destinationLoan.backgroundOpening {
             geometry.backgroundOpening = backgroundOpening
@@ -340,8 +355,10 @@ public final class NavigationExpansionRendererImpl: NavigationExpansionRenderer 
             }
             self.labelHosts.append(host)
         }
-        // The upper screen's labels the lower screen does not show, on the places measured for them above.
-        for index in sourceLoan.labels.count ..< destinationLoan.labels.count {
+        // The upper screen's labels the lower screen does not show, on the places measured for them above. The lower
+        // screen may show more labels than the upper one (a chat's title and status over a profile without a status
+        // line), so the range starts no later than it ends.
+        for index in min(sourceLoan.labels.count, destinationLoan.labels.count) ..< destinationLoan.labels.count {
             let destinationLabel = destinationLoan.labels[index]
             let destinationColor = index < destinationLoan.labelColors.count ? destinationLoan.labelColors[index] : .white
             let host = LabelHost(source: nil, destination: destinationLabel, destinationColor: destinationColor)

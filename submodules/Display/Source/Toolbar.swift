@@ -10,11 +10,14 @@ public struct ToolbarAction: Equatable {
     public let title: String
     public let isEnabled: Bool
     public let color: Color
+    /// A bundle image drawn instead of the title (the title stays for VoiceOver); nil keeps the text button.
+    public let icon: String?
     
-    public init(title: String, isEnabled: Bool, color: Color = .accent) {
+    public init(title: String, isEnabled: Bool, color: Color = .accent, icon: String? = nil) {
         self.title = title
         self.isEnabled = isEnabled
         self.color = color
+        self.icon = icon
     }
 }
 

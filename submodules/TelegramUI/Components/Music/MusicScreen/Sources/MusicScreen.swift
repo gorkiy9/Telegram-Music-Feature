@@ -14,17 +14,10 @@ import UndoUI
 import PromptUI
 import PeerMessagesMediaPlaylist
 import PresentationDataUtils
-
-/// Local flag of the Music section: turns off both the tab and the Settings row.
-public let isMusicSectionEnabled = true
-
-/// The section's strings are not in the language packs yet.
-public func musicString(_ strings: PresentationStrings, ru: String, en: String) -> String {
-    return strings.primaryComponent.languageCode.hasPrefix("ru") ? ru : en
-}
+import ICloudResources
 
 public func musicSectionTitle(strings: PresentationStrings) -> String {
-    return musicString(strings, ru: "Музыка", en: "Music")
+    return strings.Music_Music
 }
 
 enum MusicSection: Equatable {
@@ -35,6 +28,13 @@ enum MusicSection: Equatable {
     case playlists(favoritesOnly: Bool)
     case favorites
     case playlist(Int)
+    /// The music a profile shows: its tracks and, for the account's own profile, the playlists put there.
+    case profile(EnginePeer.Id)
+}
+
+/// The title of a profile's music: its row in the profile when nothing is there yet, and its screen.
+public func musicProfileLibraryTitle(strings: PresentationStrings) -> String {
+    return strings.Music_Library
 }
 
 private final class MusicTabBarContextReferenceContentSource: ContextReferenceContentSource {
@@ -52,6 +52,17 @@ private final class MusicTabBarContextReferenceContentSource: ContextReferenceCo
     }
 }
 
+/// The sheet that picks the playlist for Add to Playlist: the Playlists list with New Playlist on top.
+final class MusicPlaylistChooser {
+    let excludedId: Int?
+    let completion: (MusicPlaylist) -> Void
+
+    init(excludedId: Int?, completion: @escaping (MusicPlaylist) -> Void) {
+        self.excludedId = excludedId
+        self.completion = completion
+    }
+}
+
 /// The Music section: a tab of the root controller, and the same screen pushed from Settings.
 /// Songs, Artists and Playlists are this screen pushed over it, on one shared library.
 /// The header is the chat list's: its bar, search, tabs and media playback panel.
@@ -66,6 +77,16 @@ public final class MusicScreen: ViewController {
     let section: MusicSection
     /// Set on the screens of the sheet that picks tracks for a playlist.
     let picker: MusicTrackPicker?
+    /// Set on the sheet that picks a playlist to add tracks to.
+    let playlistChooser: MusicPlaylistChooser?
+    /// Set on the screens of the attachment menu's Music tab: a track tap selects it for sending, on every list.
+    var attachmentSelection: MusicAttachmentSelection?
+    /// Set on the root screen of the attachment menu's Music tab: its close button closes the menu.
+    var attachmentClose: (() -> Void)?
+    /// Another user's profile music: their saved-music list, as their profile loaded it.
+    var profileSavedMusicContext: ProfileSavedMusicContext?
+    /// The name of the user whose profile music this is, for the player's queue title.
+    var profilePeerName: String?
     private var library: MusicLibrary?
     private var presentationData: PresentationData
     private var presentationDataDisposable: Disposable?
@@ -87,6 +108,29 @@ public final class MusicScreen: ViewController {
 
     public convenience init(context: AccountContext, mode: Mode) {
         self.init(context: context, mode: mode, section: .hub, library: nil)
+        // The section's tab exists from launch: put the local test chat for forwarded tracks and playlists in the chat
+        // list (concept only, nothing about it reaches the server).
+        let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
+        let _ = (context.engine.messages.ensureMusicTestChat(title: strings.Music_TestMusic)
+        |> then(musicTestChatIncomingTracks(context: context))).start()
+    }
+
+    /// A playlist opened from its bubble in a chat: its own screen as a sheet over the chat.
+    static func playlistSheet(context: AccountContext, library: MusicLibrary, playlistId: Int) -> MusicScreen {
+        let controller = MusicScreen(context: context, mode: .navigation, section: .playlist(playlistId), library: library)
+        controller.navigationPresentation = .modal
+        controller._hasGlassStyle = true
+        return controller
+    }
+
+    /// A profile's music, opened from its row in the profile. Another user's tracks come from `savedMusicContext`.
+    public static func profileLibrary(context: AccountContext, peerId: EnginePeer.Id, peerName: String?, savedMusicContext: ProfileSavedMusicContext?) -> ViewController {
+        let controller = MusicScreen(context: context, mode: .navigation, section: .profile(peerId), library: MusicLibrary.shared(context: context))
+        if peerId != context.account.peerId && peerId != musicTestChatPeerId {
+            controller.profileSavedMusicContext = savedMusicContext ?? ProfileSavedMusicContext(account: context.account, peerId: peerId)
+        }
+        controller.profilePeerName = peerName
+        return controller
     }
 
     /// The sheet that adds tracks to a playlist: the hub, and the lists pushed from it, each row with an add control.
@@ -96,11 +140,19 @@ public final class MusicScreen: ViewController {
         return controller
     }
 
-    init(context: AccountContext, mode: Mode, section: MusicSection, library: MusicLibrary?, picker: MusicTrackPicker? = nil) {
+    /// Add to Playlist: the section's Playlists as a sheet; a row adds the tracks there, New Playlist creates one first.
+    static func playlistChooser(context: AccountContext, library: MusicLibrary, chooser: MusicPlaylistChooser) -> MusicScreen {
+        let controller = MusicScreen(context: context, mode: .navigation, section: .playlists(favoritesOnly: false), library: library, playlistChooser: chooser)
+        controller.navigationPresentation = .modal
+        return controller
+    }
+
+    init(context: AccountContext, mode: Mode, section: MusicSection, library: MusicLibrary?, picker: MusicTrackPicker? = nil, playlistChooser: MusicPlaylistChooser? = nil) {
         self.context = context
         self.mode = mode
         self.section = section
         self.picker = picker
+        self.playlistChooser = playlistChooser
         self.library = library
         self.presentationData = context.sharedContext.currentPresentationData.with { $0 }
         self.globalControlPanelsContext = GlobalControlPanelsContext(
@@ -125,7 +177,7 @@ public final class MusicScreen: ViewController {
                 self.tabBarItem.animationOffset = CGPoint(x: 0.0, y: (48.0 - 30.0) * 0.5)
             }
         }
-        if picker != nil {
+        if picker != nil || playlistChooser != nil {
             // The sheet is the iOS 27 one: 38 pt corners.
             self._hasGlassStyle = true
         }
@@ -158,7 +210,8 @@ public final class MusicScreen: ViewController {
             guard let self else {
                 return
             }
-            self.globalControlPanelsContextState = state
+            // In the attachment menu the player is the menu's own panel above its tabs, as for the client's audio tab.
+            self.globalControlPanelsContextState = self.attachmentSelection == nil ? state : nil
             self.requestLayout(transition: .animated(duration: 0.4, curve: .spring))
         })
     }
@@ -173,7 +226,10 @@ public final class MusicScreen: ViewController {
     }
 
     private func updateThemeAndStrings() {
-        let title = musicSectionTitle(strings: self.presentationData.strings)
+        var title = musicSectionTitle(strings: self.presentationData.strings)
+        if case .profile = self.section {
+            title = musicProfileLibraryTitle(strings: self.presentationData.strings)
+        }
         self.statusBar.statusBarStyle = self.presentationData.theme.rootController.statusBarStyle.style
         self.title = title
         if case .tab = self.mode {
@@ -200,7 +256,9 @@ public final class MusicScreen: ViewController {
 
     func open(section: MusicSection, library: MusicLibrary) {
         self.isReturningFromSection = true
-        (self.navigationController as? NavigationController)?.pushViewController(MusicScreen(context: self.context, mode: .navigation, section: section, library: library, picker: self.picker))
+        let controller = MusicScreen(context: self.context, mode: .navigation, section: section, library: library, picker: self.picker)
+        controller.attachmentSelection = self.attachmentSelection
+        (self.navigationController as? NavigationController)?.pushViewController(controller)
     }
 
     /// Applies the picked tracks and closes the whole sheet.
@@ -216,6 +274,37 @@ public final class MusicScreen: ViewController {
             return true
         }
         navigationController.setViewControllers(controllers, animated: true)
+    }
+
+    /// Closes the playlist sheet together with anything opened from it.
+    func closePlaylistChooser(including other: ViewController? = nil) {
+        guard let navigationController = self.navigationController as? NavigationController else {
+            return
+        }
+        navigationController.setViewControllers(navigationController.viewControllers.filter { $0 !== self && $0 !== other }, animated: true)
+    }
+
+    func choosePlaylist(_ playlist: MusicPlaylist) {
+        guard let chooser = self.playlistChooser else {
+            return
+        }
+        chooser.completion(playlist)
+        self.closePlaylistChooser()
+    }
+
+    /// New Playlist from the sheet: the editor opens over it, and Done adds the tracks to the new playlist and closes both.
+    func createPlaylistFromChooser(library: MusicLibrary) {
+        guard let chooser = self.playlistChooser, let navigationController = self.navigationController as? NavigationController else {
+            return
+        }
+        var editScreen: ViewController?
+        let controller = musicPlaylistEditScreen(context: self.context, library: library, playlist: nil, completion: { [weak self] playlist in
+            chooser.completion(playlist)
+            self?.closePlaylistChooser(including: editScreen)
+            editScreen = nil
+        })
+        editScreen = controller
+        navigationController.pushViewController(controller)
     }
 
     private var rootNavigationController: NavigationController? {
@@ -236,6 +325,9 @@ public final class MusicScreen: ViewController {
     }
 
     func editPlaylist(_ playlist: MusicPlaylist, library: MusicLibrary) {
+        if self.isNodeLoaded {
+            self.musicNode.suspendPlaybackForPlaylistEditing()
+        }
         self.rootNavigationController?.pushViewController(musicPlaylistEditScreen(context: self.context, library: library, playlist: playlist, completion: { _ in
         }))
     }
@@ -254,14 +346,14 @@ public final class MusicScreen: ViewController {
         library.updatePlaylist(id: playlist.id, { playlist in
             playlist.isFavorite = isFavorite
         })
+        let strings = self.presentationData.strings
+        self.presentToast(text: isFavorite ? strings.Music_PlaylistWasAddedToFavorites : strings.Music_PlaylistWasRemovedFromFavorites, iconName: isFavorite ? musicAnimatedFavoriteIconName : musicAnimatedUnfavoriteIconName)
     }
 
     func setInProfile(playlist: MusicPlaylist, isInProfile: Bool, library: MusicLibrary) {
-        library.updatePlaylist(id: playlist.id, { playlist in
-            playlist.isInProfile = isInProfile
-        })
+        library.setPlaylistInProfile(id: playlist.id, isInProfile)
         let strings = self.presentationData.strings
-        self.presentToast(text: isInProfile ? musicString(strings, ru: "Плейлист добавлен в профиль", en: "The playlist was added to your profile") : musicString(strings, ru: "Плейлист убран из профиля", en: "The playlist was removed from your profile"), iconName: "Peer Info/SavedMusic")
+        self.presentToast(text: isInProfile ? strings.Music_PlaylistWasAddedToYourProfile : strings.Music_PlaylistWasRemovedFromYourProfile, iconName: "Peer Info/SavedMusic")
     }
 
     func play(playlist: MusicPlaylist, shuffled: Bool, library: MusicLibrary) {
@@ -290,7 +382,7 @@ public final class MusicScreen: ViewController {
             }
             let strings = self.presentationData.strings
             if queued {
-                self.presentToast(text: next ? musicString(strings, ru: "Плейлист будет следующим", en: "The playlist will play next") : musicString(strings, ru: "Плейлист добавлен в очередь", en: "The playlist was added to the queue"), iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
+                self.presentToast(text: next ? strings.Music_PlaylistWillPlayNext : strings.Music_PlaylistWasAddedToQueue, iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
             } else {
                 self.play(track: tracks[0], tracks: tracks, library: library, queueTitle: musicPlaylistQueueTitle(strings: strings, playlist: playlist), queueKind: .playlist(playlist.id))
             }
@@ -305,6 +397,8 @@ public final class MusicScreen: ViewController {
             return .artist(artist)
         case let .playlist(id):
             return .playlist(id)
+        case let .profile(peerId):
+            return .profile(peerId)
         case .hub, .songs(nil), .artists, .playlists, .favorites:
             return .tracks
         }
@@ -314,32 +408,68 @@ public final class MusicScreen: ViewController {
         let strings = self.presentationData.strings
         switch self.section {
         case let .songs(artist?):
-            return musicString(strings, ru: "Артист \(artist)", en: "Artist \(artist)")
+            return strings.Music_Artist(artist).string
         case .favorites:
-            return musicString(strings, ru: "Избранное", en: "Favorites")
+            return strings.Music_Favorites
         case let .playlist(id):
             if let playlist = library.playlist(id: id) {
                 return musicPlaylistQueueTitle(strings: strings, playlist: playlist)
             }
             return musicOwnMusicQueueTitle(strings: strings)
+        case let .profile(peerId):
+            if peerId != self.context.account.peerId, let name = self.profilePeerName {
+                return MusicPlayerSupport.userMusicTitle(strings: strings, name: name)
+            }
+            return MusicPlayerSupport.libraryTitle(strings: strings)
         case .hub, .songs(nil), .artists, .playlists:
             return musicOwnMusicQueueTitle(strings: strings)
         }
     }
 
-    /// Chat tracks are forwarded as their messages; saved ones have none, so a playlist of them sends its first file.
+    /// The test chat gets the playlist bubble; real chats get its tracks (see `musicSharePlaylistSubject`).
     func share(playlist: MusicPlaylist, library: MusicLibrary) {
         let tracks = library.tracks(of: playlist)
-        let chatMessages = tracks.filter { !$0.isSaved }.map(\.message)
-        let subject: ShareControllerSubject
-        if !chatMessages.isEmpty {
-            subject = .messages(chatMessages)
-        } else if let file = tracks.first?.file {
-            subject = .media(.standalone(media: file), nil)
-        } else {
+        guard !tracks.isEmpty else {
             return
         }
-        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject)), in: .window(.root))
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: musicSharePlaylistSubject(context: self.context, playlist: playlist, tracks: tracks), completed: { [weak self] peerIds in
+            self?.presentForwardedToast(peerIds: peerIds)
+        }, hidesSenderNames: true)), in: .window(.root))
+    }
+
+    /// The client's success toast (animated checkmark) naming the chats the playlist went to.
+    private func presentForwardedToast(peerIds: [EnginePeer.Id]) {
+        guard !peerIds.isEmpty else {
+            return
+        }
+        let context = self.context
+        let _ = (context.engine.data.get(EngineDataList(peerIds.map(TelegramEngine.EngineData.Item.Peer.Peer.init)))
+        |> deliverOnMainQueue).startStandalone(next: { [weak self] peerList in
+            guard let self else {
+                return
+            }
+            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+            let strings = presentationData.strings
+            func name(_ peer: EnginePeer) -> String {
+                let title = peer.id == context.account.peerId ? strings.DialogList_SavedMessages : peer.displayTitle(strings: strings, displayOrder: presentationData.nameDisplayOrder)
+                return "**\(title.replacingOccurrences(of: "**", with: ""))**"
+            }
+            let peers = peerList.compactMap { $0 }
+            let target: String
+            if peers.count == 1 {
+                target = name(peers[0])
+            } else if peers.count == 2 {
+                target = strings.Music_TwoChats("\(name(peers[0]))", "\(name(peers[1]))").string
+            } else if let first = peers.first {
+                target = strings.Music_ChatAndOthers("\(name(first))", "\(peers.count - 1)").string
+            } else {
+                return
+            }
+            let text = strings.Music_ForwardedTo(target).string
+            self.present(UndoOverlayController(presentationData: presentationData, content: .succeed(text: text, timeout: nil, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: true, action: { _ in
+                return false
+            }), in: .current)
+        })
     }
 
     func confirmRemoval(playlist: MusicPlaylist, library: MusicLibrary, completion: (() -> Void)? = nil) {
@@ -348,8 +478,8 @@ public final class MusicScreen: ViewController {
         let actionSheet = ActionSheetController(presentationData: presentationData)
         actionSheet.setItemGroups([
             ActionSheetItemGroup(items: [
-                ActionSheetTextItem(title: musicString(strings, ru: "Треки останутся в музыке.", en: "The tracks stay in your music.")),
-                ActionSheetButtonItem(title: musicString(strings, ru: "Удалить плейлист", en: "Delete Playlist"), color: .destructive, action: { [weak actionSheet, weak library] in
+                ActionSheetTextItem(title: strings.Music_TracksStayInYourMusic),
+                ActionSheetButtonItem(title: strings.Music_DeletePlaylist, color: .destructive, action: { [weak actionSheet, weak library] in
                     actionSheet?.dismissAnimated()
                     library?.removePlaylist(id: playlist.id)
                     completion?()
@@ -389,14 +519,14 @@ public final class MusicScreen: ViewController {
         }
 
         return [
-            action(musicString(strings, ru: "Добавить трек", en: "Add Track"), "Chat/Context Menu/AddMusic", { [weak self, weak library] in
+            action(strings.Music_AddTrack, "Chat/Context Menu/AddMusic", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
                 let _ = self.selectTab()
                 self.addTrack(library: library)
             }),
-            action(musicString(strings, ru: "Создать плейлист", en: "New Playlist"), "Music/NoteList", { [weak self, weak library] in
+            action(strings.Music_NewPlaylist, "Music/NoteList", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
@@ -408,32 +538,32 @@ public final class MusicScreen: ViewController {
                 })
             }),
             .separator,
-            action(musicString(strings, ru: "Треки", en: "Tracks"), "Music/Note", { [weak self, weak library] in
+            action(strings.Music_Tracks, "Music/Note", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
                 self.openFromMenu(section: .songs(artist: nil), library: library)
             }),
-            action(musicString(strings, ru: "Артисты", en: "Artists"), "Music/Microphone", { [weak self, weak library] in
+            action(strings.Music_Artists, "Music/Microphone", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
                 self.openFromMenu(section: .artists, library: library)
             }),
-            action(musicString(strings, ru: "Плейлисты", en: "Playlists"), "Music/Playlists", { [weak self, weak library] in
+            action(strings.Music_Playlists, "Music/Playlists", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
                 self.openFromMenu(section: .playlists(favoritesOnly: false), library: library)
             }),
             .separator,
-            action(musicString(strings, ru: "Воспроизвести", en: "Play"), "Chat/Context Menu/Play", { [weak self, weak library] in
+            action(strings.Music_Play, "Chat/Context Menu/Play", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
                 self.playAll(library: library, shuffled: false)
             }),
-            action(musicString(strings, ru: "Перемешать", en: "Shuffle"), "Music/Shuffle", { [weak self, weak library] in
+            action(strings.Music_Shuffle, "Music/Shuffle", { [weak self, weak library] in
                 guard let self, let library else {
                     return
                 }
@@ -468,20 +598,30 @@ public final class MusicScreen: ViewController {
         }
         switch action {
         case .left:
-            self.musicNode.toggleSelectAll()
-        case .right:
             self.musicNode.deleteSelectedTracks()
+        case .right:
+            self.musicNode.forwardSelectedTracks()
         case .middle:
             break
         }
     }
 
+    func presentFavoriteToast(isFavorite: Bool) {
+        let toast = musicFavoriteToast(strings: self.presentationData.strings, isFavorite: isFavorite)
+        self.presentToast(text: toast.text, iconName: toast.iconName)
+    }
+
+    func presentRemovedFromMusicToast(count: Int) {
+        let toast = musicLibraryToast(strings: self.presentationData.strings, isInMusic: false, count: count)
+        self.presentToast(text: toast.text, iconName: toast.iconName)
+    }
+
     func presentToast(text: String, iconName: String) {
         let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
-        guard let image = generateTintedImage(image: UIImage(bundleImageName: iconName), color: .white) else {
+        guard let content = musicToastContent(text: text, iconName: iconName) else {
             return
         }
-        self.present(UndoOverlayController(presentationData: presentationData, content: .universalImage(image: image, size: nil, title: nil, text: text, customUndoText: nil, timeout: 3.0), action: { _ in
+        self.present(UndoOverlayController(presentationData: presentationData, content: content, action: { _ in
             return true
         }), in: .current)
     }
@@ -494,7 +634,7 @@ public final class MusicScreen: ViewController {
             }
             let strings = self.presentationData.strings
             if queued {
-                self.presentToast(text: next ? musicString(strings, ru: "Трек будет следующим", en: "The track will play next") : musicString(strings, ru: "Трек добавлен в очередь", en: "The track was added to the queue"), iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
+                self.presentToast(text: next ? strings.Music_TrackWillPlayNext : strings.Music_TrackWasAddedToQueue, iconName: next ? "Chat/Context Menu/MoveUp" : "Chat/Context Menu/MoveDown")
             } else {
                 self.play(track: track, tracks: [track], library: library)
             }
@@ -507,13 +647,8 @@ public final class MusicScreen: ViewController {
     }
 
     func addToPlaylist(tracks: [MusicTrack], excluding excludedId: Int?, library: MusicLibrary) {
-        presentMusicAddToPlaylistSheet(context: self.context, library: library, tracks: tracks, excluding: excludedId, present: { [weak self] controller in
-            self?.present(controller, in: .window(.root))
-        }, createPlaylist: { [weak self, weak library] completion in
-            guard let self, let library else {
-                return
-            }
-            self.createPlaylist(library: library, completion: completion)
+        presentMusicAddToPlaylistSheet(context: self.context, library: library, tracks: tracks, excluding: excludedId, push: { [weak self] controller in
+            self?.rootNavigationController?.pushViewController(controller)
         }, toast: { [weak self] text in
             self?.presentToast(text: text, iconName: "Chat/Context Menu/AddCaption")
         })
@@ -522,7 +657,7 @@ public final class MusicScreen: ViewController {
     func setSavedToProfile(track: MusicTrack, isSaved: Bool, library: MusicLibrary) {
         library.setSavedToProfile(track, isSaved)
         let strings = self.presentationData.strings
-        self.presentToast(text: isSaved ? strings.MediaPlayer_SavedMusic_AddedToProfile : musicString(strings, ru: "Трек убран из профиля", en: "The track was removed from your profile"), iconName: "Peer Info/SavedMusic")
+        self.presentToast(text: isSaved ? strings.MediaPlayer_SavedMusic_AddedToProfile : strings.Music_TrackWasRemovedFromYourProfile, iconName: "Peer Info/SavedMusic")
     }
 
     /// A chat's track is forwarded as its message; a saved one has no message to forward, so its file is sent.
@@ -533,24 +668,33 @@ public final class MusicScreen: ViewController {
         } else {
             subject = .messages([track.message])
         }
-        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject)), in: .window(.root))
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject, hidesSenderNames: true)), in: .window(.root))
+    }
+
+    /// Selected tracks are sent like tracks attached in a chat (see `musicShareTracksSubject`).
+    func share(tracks: [MusicTrack], completion: @escaping () -> Void) {
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: musicShareTracksSubject(context: self.context, tracks: tracks), completed: { [weak self] peerIds in
+            self?.presentForwardedToast(peerIds: peerIds)
+            completion()
+        })), in: .window(.root))
     }
 
     func confirmRemoval(tracks: [MusicTrack], library: MusicLibrary, completion: @escaping () -> Void) {
         let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
         let strings = presentationData.strings
         let actionSheet = ActionSheetController(presentationData: presentationData)
-        let title = tracks.count == 1 ? musicString(strings, ru: "Удалить трек", en: "Delete Track") : musicString(strings, ru: "Удалить треки: \(tracks.count)", en: "Delete \(tracks.count) Tracks")
+        let title = tracks.count == 1 ? strings.Music_DeleteTrack : strings.Music_DeleteTracks("\(tracks.count)").string
         var items: [ActionSheetItem] = []
         if tracks.contains(where: \.isSaved) {
-            items.append(ActionSheetTextItem(title: musicString(strings, ru: "Треки останутся в профиле и в чатах.", en: "The tracks stay in your profile and in the chats.")))
+            items.append(ActionSheetTextItem(title: strings.Music_TracksStayInYourProfileAndInChats))
         } else {
-            items.append(ActionSheetTextItem(title: musicString(strings, ru: "Файлы останутся в чатах.", en: "The files stay in the chats.")))
+            items.append(ActionSheetTextItem(title: strings.Music_FilesStayInChats))
         }
-        items.append(ActionSheetButtonItem(title: title, color: .destructive, action: { [weak actionSheet, weak library] in
+        items.append(ActionSheetButtonItem(title: title, color: .destructive, action: { [weak self, weak actionSheet, weak library] in
             actionSheet?.dismissAnimated()
             library?.remove(tracks: tracks)
             completion()
+            self?.presentRemovedFromMusicToast(count: tracks.count)
         }))
         actionSheet.setItemGroups([
             ActionSheetItemGroup(items: items),
@@ -643,5 +787,51 @@ public final class MusicScreen: ViewController {
     override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
         super.containerLayoutUpdated(layout, transition: transition)
         self.musicNode.containerLayoutUpdated(layout, transition: transition)
+    }
+}
+
+/// Audio files copied into the app's Documents/MusicTestChat folder arrive in the test chat as messages from it, once each.
+/// They are local only, so the Music section (built from server search) never sees them.
+private func musicTestChatIncomingTracks(context: AccountContext) -> Signal<Never, NoError> {
+    guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        return .complete()
+    }
+    let folder = documents.appendingPathComponent("MusicTestChat", isDirectory: true)
+    guard let urls = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
+        return .complete()
+    }
+    let audioUrls = urls.filter { ["mp3", "m4a", "flac"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    if audioUrls.isEmpty {
+        return .complete()
+    }
+    return combineLatest(audioUrls.map { url -> Signal<(Int32, TelegramMediaFile)?, NoError> in
+        return iCloudFileDescription(url)
+        |> take(1)
+        |> map { item -> (Int32, TelegramMediaFile)? in
+            guard let item else {
+                return nil
+            }
+            // A stable id per file name keeps a file from arriving twice.
+            var hash: UInt32 = 2166136261
+            for byte in item.fileName.utf8 {
+                hash = (hash ^ UInt32(byte)) &* 16777619
+            }
+            let messageId = Int32(1_000_000 + hash % 1_000_000)
+            var previewRepresentations: [TelegramMediaImageRepresentation] = []
+            if item.audioMetadata?.hasAudioArtwork == true {
+                previewRepresentations.append(TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: 320, height: 320), resource: ICloudFileResource(urlData: item.urlData, thumbnail: true), progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false))
+            }
+            var attributes: [TelegramMediaFileAttribute] = [.FileName(fileName: item.fileName)]
+            if let audioMetadata = item.audioMetadata {
+                attributes.append(.Audio(isVoice: false, duration: audioMetadata.duration, title: audioMetadata.title, performer: audioMetadata.performer, waveform: nil))
+            }
+            let mimeType = guessMimeTypeByFileExtension((item.fileName as NSString).pathExtension)
+            let file = TelegramMediaFile(fileId: EngineMedia.Id(namespace: Namespaces.Media.LocalFile, id: Int64(messageId)), partialReference: nil, resource: ICloudFileResource(urlData: item.urlData, thumbnail: false), previewRepresentations: previewRepresentations, videoThumbnails: [], immediateThumbnailData: nil, mimeType: mimeType, size: Int64(item.fileSize), attributes: attributes, alternativeRepresentations: [])
+            return (messageId, file)
+        }
+    })
+    |> take(1)
+    |> mapToSignal { items -> Signal<Never, NoError> in
+        return context.engine.messages.addMusicTestChatIncomingFiles(items.compactMap { $0.map { (messageId: $0.0, file: $0.1) } })
     }
 }

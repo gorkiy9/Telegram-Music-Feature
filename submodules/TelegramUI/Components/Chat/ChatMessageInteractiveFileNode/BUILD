@@ -23,6 +23,7 @@ swift_library(
         "//submodules/FileMediaResourceStatus",
         "//submodules/CheckNode",
         "//submodules/MusicAlbumArtResources",
+        "//submodules/ListMessageItem",
         "//submodules/AudioBlob",
         "//submodules/ContextUI",
         "//submodules/ChatPresentationInterfaceState",

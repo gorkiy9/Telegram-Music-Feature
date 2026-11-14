@@ -17,6 +17,7 @@ final class PeerInfoSelectionPanelNode: ASDisplayNode {
     private let forwardMessages: () -> Void
     private let reportMessages: () -> Void
     private let displayCopyProtectionTip: (UIView, Bool) -> Void
+    private let cancelSelection: () -> Void
     
     let selectionPanel: ChatMessageSelectionInputPanelNode
     let separatorNode: ASDisplayNode
@@ -26,7 +27,7 @@ final class PeerInfoSelectionPanelNode: ASDisplayNode {
         return self.selectionPanel.viewForOverlayContent
     }
     
-    init(context: AccountContext, presentationData: PresentationData, peerId: EnginePeer.Id, deleteMessages: @escaping () -> Void, shareMessages: @escaping () -> Void, forwardMessages: @escaping () -> Void, reportMessages: @escaping () -> Void, displayCopyProtectionTip: @escaping (UIView, Bool) -> Void) {
+    init(context: AccountContext, presentationData: PresentationData, peerId: EnginePeer.Id, deleteMessages: @escaping () -> Void, shareMessages: @escaping () -> Void, forwardMessages: @escaping () -> Void, reportMessages: @escaping () -> Void, displayCopyProtectionTip: @escaping (UIView, Bool) -> Void, cancelSelection: @escaping () -> Void) {
         self.context = context
         self.peerId = peerId
         self.deleteMessages = deleteMessages
@@ -34,6 +35,7 @@ final class PeerInfoSelectionPanelNode: ASDisplayNode {
         self.forwardMessages = forwardMessages
         self.reportMessages = reportMessages
         self.displayCopyProtectionTip = displayCopyProtectionTip
+        self.cancelSelection = cancelSelection
         
         let presentationData = presentationData
         
@@ -47,6 +49,7 @@ final class PeerInfoSelectionPanelNode: ASDisplayNode {
         }, setupEditMessage: { _, _ in
         }, beginMessageSelection: { _, _ in
         }, cancelMessageSelection: { _ in
+            cancelSelection()
         }, deleteSelectedMessages: { _ in
             deleteMessages()
         }, reportSelectedMessages: {

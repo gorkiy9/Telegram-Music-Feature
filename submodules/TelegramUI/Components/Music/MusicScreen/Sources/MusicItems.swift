@@ -77,20 +77,7 @@ func musicChatPresentationData(_ presentationData: PresentationData) -> ChatPres
 }
 
 func musicTrackCountString(_ strings: PresentationStrings, _ count: Int) -> String {
-    if strings.primaryComponent.languageCode.hasPrefix("ru") {
-        let mod10 = count % 10
-        let mod100 = count % 100
-        let word: String
-        if mod10 == 1 && mod100 != 11 {
-            word = "трек"
-        } else if (2 ... 4).contains(mod10) && !(12 ... 14).contains(mod100) {
-            word = "трека"
-        } else {
-            word = "треков"
-        }
-        return "\(count) \(word)"
-    }
-    return count == 1 ? "1 track" : "\(count) tracks"
+    return strings.Music_TrackCount(Int32(clamping: count))
 }
 
 /// The second line of a playlist row: its description, or how many tracks it holds.

@@ -127,6 +127,7 @@ import TextProcessingScreen
 import CreateBotScreen
 import EmojiStatusSelectionComponent
 import EntityKeyboard
+import MusicScreen
 
 private final class AccountUserInterfaceInUseContext {
     let subscribers = Bag<(Bool) -> Void>()
@@ -4592,6 +4593,26 @@ public final class SharedAccountContextImpl: SharedAccountContext {
         })
     }
     
+    public func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction) {
+        MusicPlayerSupport.handleSharedPlaylist(context: context, playlistId: playlistId, action: action)
+    }
+
+    public func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage]) {
+        MusicPlayerSupport.openTrackGroup(context: context, messages: messages)
+    }
+
+    public func addMusicTracksToLibrary(context: AccountContext, messages: [EngineRawMessage]) {
+        MusicPlayerSupport.addToMusic(context: context, messages: messages)
+    }
+
+    public func musicLibraryFileIds(context: AccountContext) -> Signal<Set<Int64>, NoError> {
+        return MusicPlayerSupport.libraryFileIds(context: context)
+    }
+
+    public func musicLibraryContainsFile(context: AccountContext, fileId: Int64) -> Bool {
+        return MusicPlayerSupport.libraryContainsFile(context: context, fileId: fileId)
+    }
+    
     public func makeShareScreen(context: AccountContext, params: ShareControllerParams) -> ViewController {
         if params.immediateExternalShare {
             return self.makeShareController(context: context, params: params)
@@ -4635,6 +4656,7 @@ public final class SharedAccountContextImpl: SharedAccountContext {
             screen.linkCopied = linkCopied
         }
         screen.canSendInHighQuality = params.canSendInHighQuality
+        screen.hidesSenderNamesByDefault = params.hidesSenderNames
         screen.actionCompleted = params.actionCompleted
         screen.enqueued = { ids, correlationIds in
             shared = true

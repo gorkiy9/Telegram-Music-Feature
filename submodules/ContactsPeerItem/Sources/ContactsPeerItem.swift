@@ -222,6 +222,8 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
     let arrowIsDisclosure: Bool
     /// A static glyph before the arrow, such as a favorite mark.
     let trailingIcon: UIImage?
+    /// With a selection, a tap on the checkmark's column calls this instead of the row's action.
+    let selectionAction: (() -> Void)?
     /// Draws the row like a chat list row: a 60 pt avatar and a semibold title.
     let isLarge: Bool
     /// A 62 pt row with a 44 pt avatar and the text at 72, like a list row with a cover (Music, Artist Row).
@@ -288,6 +290,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         contextAction: ((ASDisplayNode, ContextGesture?, CGPoint?) -> Void)? = nil, arrowAction: (() -> Void)? = nil,
         arrowIsDisclosure: Bool = false,
         trailingIcon: UIImage? = nil,
+        selectionAction: (() -> Void)? = nil,
         isLarge: Bool = false,
         isMedium: Bool = false,
         animationCache: AnimationCache? = nil,
@@ -334,6 +337,7 @@ public class ContactsPeerItem: ItemListItem, ListViewItemWithHeader {
         self.arrowAction = arrowAction
         self.arrowIsDisclosure = arrowIsDisclosure
         self.trailingIcon = trailingIcon
+        self.selectionAction = selectionAction
         self.isLarge = isLarge
         self.isMedium = isMedium
         self.animationCache = animationCache
@@ -731,6 +735,27 @@ public class ContactsPeerItemNode: ItemListRevealOptionsItemNode {
         super.didLoad()
         
         self.updateEnableGestures()
+
+        let selectionTapRecognizer = AreaTapGestureRecognizer(target: self, action: #selector(self.selectionTapGesture(_:)))
+        selectionTapRecognizer.isInArea = { [weak self] point in
+            guard let self, let item = self.item, item.selectionAction != nil, case .selectable = item.selection, let params = self.layoutParams?.1 else {
+                return false
+            }
+            switch item.selectionPosition {
+            case .left:
+                return point.x <= params.leftInset + 56.0
+            case .right:
+                return point.x >= self.bounds.width - params.rightInset - 56.0
+            }
+        }
+        self.view.addGestureRecognizer(selectionTapRecognizer)
+    }
+
+    @objc private func selectionTapGesture(_ recognizer: UITapGestureRecognizer) {
+        guard case .ended = recognizer.state, let item = self.item else {
+            return
+        }
+        item.selectionAction?()
     }
     
     private func updateEnableGestures() {
@@ -2281,4 +2306,17 @@ public extension ListViewItemHeaderFamily {
     /// Items whose section-letter header runs group together: `ContactsPeerItem` and
     /// `ContactListActionItem`. Was encoded as a pair of concrete-type casts.
     static let contactList = ListViewItemHeaderFamily("contactList")
+}
+
+/// A tap that begins only inside an area of the view, so the rest of the row keeps its own tap.
+private final class AreaTapGestureRecognizer: UITapGestureRecognizer {
+    var isInArea: ((CGPoint) -> Bool)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first, let view = self.view, let isInArea = self.isInArea, isInArea(touch.location(in: view)) {
+            super.touchesBegan(touches, with: event)
+        } else {
+            self.state = .failed
+        }
+    }
 }

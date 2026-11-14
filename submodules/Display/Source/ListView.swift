@@ -365,6 +365,9 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
     public final var beganInteractiveDragging: (CGPoint) -> Void = { _ in }
     public final var endedInteractiveDragging: (CGPoint) -> Void = { _ in }
     public final var didEndScrolling: ((Bool) -> Void)?
+    /// Called when a drag ends with the distance the list is about to decelerate; returns the distance to use instead,
+    /// so a screen can settle on a resting point (a profile-like header snapping open or shut).
+    public final var adjustDecelerationDistance: ((CGFloat) -> CGFloat)?
     public final var didEndScrollingWithOverscroll: (() -> Void)?
     
     
@@ -922,6 +925,10 @@ open class ListViewImpl: ASDisplayNode, ListView, ASScrollViewDelegate, ASGestur
     public func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
         if let shouldStopScrolling = self.shouldStopScrolling, shouldStopScrolling(velocity.y) {
             targetContentOffset.pointee.y = scrollView.contentOffset.y
+        }
+        if let adjustDecelerationDistance = self.adjustDecelerationDistance {
+            let currentOffset = scrollView.contentOffset.y
+            targetContentOffset.pointee.y = currentOffset + adjustDecelerationDistance(targetContentOffset.pointee.y - currentOffset)
         }
     }
     

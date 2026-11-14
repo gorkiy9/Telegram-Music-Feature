@@ -30,6 +30,8 @@ import OverlayStatusController
 import UndoUI
 import TabSelectionRecognizer
 import EmojiTextAttachmentView
+import ButtonComponent
+import AnimatedTextComponent
 
 private let legacyButtonSize = CGSize(width: 88.0, height: 49.0)
 private let glassButtonSize = CGSize(width: 72.0, height: 62.0)
@@ -283,7 +285,8 @@ private final class AttachButtonComponent: CombinedComponent {
                 name = "Emoji"
                 imageName = "Chat/Attach Menu/Emoji"
             case .audio:
-                name = strings.Attachment_Audio
+                // The tab opens the Music section's library (`MusicAttachmentScreen`); its strings are not in the language packs yet.
+                name = strings.Music_Music
                 animationName = "TabAudio"
                 imageName = ""
             case .link:
@@ -601,6 +604,33 @@ private final class BadgeNode: ASDisplayNode {
     }
 }
 
+/// Motion of the main button's own content (the trailing counter and the title moving for it): one place for its
+/// springs and timings. The layout spring is critically damped and settles within 0.25 s; the counter arrives with a
+/// slight bounce and leaves faster than it comes.
+private enum MainButtonMotion {
+    static let layout: ContainedViewLayoutTransition = .animated(duration: 0.25, curve: .customSpring(damping: 134.0, initialVelocity: 0.0))
+    static let enterDuration: Double = 0.3
+    static let enterDamping: CGFloat = 70.0
+    static let exitDuration: Double = 0.15
+    static let fadeDuration: Double = 0.15
+    static let pulseDuration: Double = 0.25
+    /// A changing digit travels its full height, so it flows in from the badge's edge.
+    static let digitSlideFactor: CGFloat = 1.0
+}
+
+/// An SF Symbol at the title's size and weight, drawn into a bitmap in `color` (the node draws plain images).
+private func generateSystemSymbolImage(name: String, font: AttachmentMainButtonState.Font, color: UIColor) -> UIImage? {
+    let configuration = UIImage.SymbolConfiguration(pointSize: 17.0, weight: font == .bold ? .semibold : .regular, scale: .large)
+    guard let symbol = UIImage(systemName: name, withConfiguration: configuration)?.withTintColor(color, renderingMode: .alwaysOriginal) else {
+        return nil
+    }
+    let format = UIGraphicsImageRendererFormat.preferred()
+    format.opaque = false
+    return UIGraphicsImageRenderer(size: symbol.size, format: format).image { _ in
+        symbol.draw(at: CGPoint())
+    }
+}
+
 private final class MainButtonNode: HighlightTrackingButtonNode {
     private var state: AttachmentMainButtonState
     private var panelStyle: AttachmentPanel.Style?
@@ -611,6 +641,10 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
     private var iconLayer: InlineStickerItemLayer?
     fileprivate let textNode: ImmediateTextNode
     private var badgeNode: BadgeNode?
+    /// The counter at the trailing edge (`BadgeAlignment.trailing`): the client's button badge, whose number rolls.
+    private var trailingBadge: ComponentView<Empty>?
+    private var trailingBadgeValue: Int?
+    private var iconSystemName: String?
     private let statusNode: SemanticStatusNode
     private var progressNode: ASImageNode?
 
@@ -849,6 +883,104 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
 
         self.setupShimmering()
 
+        // The trailing counter: measured first, since the title and icon centre in the space left of it.
+        let reduceMotion = UIAccessibility.isReduceMotionEnabled
+        let trailingCount = state.badgeAlignment == .trailing ? state.badge.flatMap { Int($0) } : nil
+        let previousTrailingCount = self.trailingBadgeValue
+        self.trailingBadgeValue = trailingCount
+        let countChanged = previousTrailingCount != trailingCount
+        // Count changes move the content on the button's own motion, not the sheet's 0.5 s layout spring.
+        let contentTransition: ContainedViewLayoutTransition
+        if !transition.isAnimated || !countChanged {
+            contentTransition = transition
+        } else if reduceMotion {
+            contentTransition = .immediate
+        } else {
+            contentTransition = MainButtonMotion.layout
+        }
+        // With the counter shown, the icon and title keep to the left edge at the counter's inset, mirroring it.
+        var leadingInset: CGFloat?
+        if let trailingCount {
+            let badge: ComponentView<Empty>
+            // The number flows vertically, digit by digit (only the digits that change): up when it grows, down when
+            // it shrinks, blurred in passing and clipped by the badge. Reduce Motion: a crossfade.
+            var badgeTransition: ComponentTransition = reduceMotion && countChanged && transition.isAnimated ? .easeInOut(duration: MainButtonMotion.fadeDuration) : ComponentTransition(contentTransition)
+            if let current = self.trailingBadge {
+                badge = current
+            } else {
+                badge = ComponentView()
+                self.trailingBadge = badge
+                badgeTransition = .immediate
+            }
+            var numberColor = state.textColor
+            if case let .color(color) = state.background {
+                numberColor = color
+            }
+            let badgeSize = badge.update(
+                transition: badgeTransition,
+                component: AnyComponent(ButtonBadgeComponent(
+                    fillColor: state.textColor,
+                    style: .round,
+                    content: AnyComponent(AnimatedTextComponent(
+                        font: Font.with(size: 15.0, design: .round, weight: .semibold, traits: .monospacedNumbers),
+                        color: numberColor,
+                        items: [AnimatedTextComponent.Item(id: AnyHashable(0), content: .number(trailingCount, minDigits: 0))],
+                        noDelay: true,
+                        animateScale: false,
+                        animateSlide: !reduceMotion,
+                        blur: !reduceMotion,
+                        useTransitionAnimation: true,
+                        slidesDown: (previousTrailingCount ?? 0) > trailingCount,
+                        slideFactor: MainButtonMotion.digitSlideFactor
+                    ))
+                )),
+                environment: {},
+                containerSize: CGSize(width: 100.0, height: 100.0)
+            )
+            // Concentric with the capsule: the same inset on the right as above and below.
+            let edgeInset = floorToScreenPixels((size.height - badgeSize.height) * 0.5)
+            let frame = CGRect(origin: CGPoint(x: size.width - edgeInset - badgeSize.width, y: edgeInset), size: badgeSize)
+            leadingInset = edgeInset
+
+            if let badgeView = badge.view {
+                badgeView.layer.cornerRadius = badgeSize.height * 0.5
+                badgeView.clipsToBounds = true
+                if badgeView.superview == nil {
+                    badgeView.frame = frame
+                    self.view.addSubview(badgeView)
+                    if transition.isAnimated {
+                        badgeView.layer.animateAlpha(from: 0.0, to: 1.0, duration: MainButtonMotion.fadeDuration)
+                        if !reduceMotion {
+                            badgeView.layer.animateSpring(from: 0.5 as NSNumber, to: 1.0 as NSNumber, keyPath: "transform.scale", duration: MainButtonMotion.enterDuration, damping: MainButtonMotion.enterDamping)
+                        }
+                    }
+                } else {
+                    // The number rolls inside; the badge keeps its right edge while it widens.
+                    contentTransition.updateFrame(view: badgeView, frame: frame)
+                    if transition.isAnimated, !reduceMotion, let previousTrailingCount, previousTrailingCount != trailingCount {
+                        let middleScale: CGFloat = previousTrailingCount < trailingCount ? 1.1 : 0.9
+                        let values: [NSNumber] = [1.0, middleScale as NSNumber, 1.0]
+                        badgeView.layer.animateKeyframes(values: values, duration: MainButtonMotion.pulseDuration, keyPath: "transform.scale")
+                    }
+                }
+            }
+        } else if let badge = self.trailingBadge {
+            self.trailingBadge = nil
+            if let badgeView = badge.view {
+                if transition.isAnimated {
+                    // Leaving is quicker than arriving.
+                    badgeView.layer.animateAlpha(from: 1.0, to: 0.0, duration: MainButtonMotion.exitDuration, removeOnCompletion: false, completion: { [weak badgeView] _ in
+                        badgeView?.removeFromSuperview()
+                    })
+                    if !reduceMotion {
+                        badgeView.layer.animateScale(from: 1.0, to: 0.5, duration: MainButtonMotion.exitDuration, removeOnCompletion: false)
+                    }
+                } else {
+                    badgeView.removeFromSuperview()
+                }
+            }
+        }
+
         let colorUpdated = previousState.textColor != state.textColor
         if let progressNode = self.progressNode, colorUpdated {
             let diameter: CGFloat = size.height - 22.0
@@ -867,7 +999,7 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
             self.textNode.attributedText = NSAttributedString(string: text, font: font, textColor: state.textColor)
 
             let textSize = self.textNode.updateLayout(size)
-            textFrame = CGRect(origin: CGPoint(x: floorToScreenPixels((size.width - textSize.width) / 2.0), y: floorToScreenPixels((size.height - textSize.height) / 2.0)), size: textSize)
+            textFrame = CGRect(origin: CGPoint(x: leadingInset ?? floorToScreenPixels((size.width - textSize.width) / 2.0), y: floorToScreenPixels((size.height - textSize.height) / 2.0)), size: textSize)
 
             switch state.background {
             case let .color(backgroundColor):
@@ -903,7 +1035,7 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
             }
         }
 
-        if let badge = state.badge {
+        if let badge = state.badge, state.badgeAlignment == .inline {
             let badgeNode: BadgeNode
             var badgeTransition = transition
             if let current = self.badgeNode {
@@ -930,20 +1062,39 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
             badgeNode.removeFromSupernode()
         }
 
-        if let iconName = state.iconName {
+        if state.iconName != nil || state.iconSystemName != nil {
             let iconNode: ASImageNode
+            var iconIsNew = false
             if let current = self.iconNode {
                 iconNode = current
             } else {
                 iconNode = ASImageNode()
                 iconNode.displaysAsynchronously = false
-                iconNode.image = generateTintedImage(image: UIImage(bundleImageName: iconName), color: state.textColor)
                 self.iconNode = iconNode
                 self.addSubnode(iconNode)
+                iconIsNew = true
+            }
+            if iconIsNew || colorUpdated || self.iconSystemName != state.iconSystemName {
+                self.iconSystemName = state.iconSystemName
+                if let systemName = state.iconSystemName {
+                    iconNode.image = generateSystemSymbolImage(name: systemName, font: state.font, color: state.textColor)
+                } else if let iconName = state.iconName {
+                    iconNode.image = generateTintedImage(image: UIImage(bundleImageName: iconName), color: state.textColor)
+                }
             }
             if let iconSize = iconNode.image?.size {
-                textFrame.origin.x += (iconSize.width + 6.0) / 2.0
-                iconNode.frame = CGRect(origin: CGPoint(x: textFrame.minX - iconSize.width - 6.0, y: textFrame.minY + floorToScreenPixels((textFrame.height - iconSize.height) * 0.5)), size: iconSize)
+                if let leadingInset {
+                    textFrame.origin.x = leadingInset + iconSize.width + 6.0
+                } else {
+                    textFrame.origin.x += (iconSize.width + 6.0) / 2.0
+                }
+                let iconFrame = CGRect(origin: CGPoint(x: textFrame.minX - iconSize.width - 6.0, y: textFrame.minY + floorToScreenPixels((textFrame.height - iconSize.height) * 0.5)), size: iconSize)
+                if iconIsNew {
+                    iconNode.frame = iconFrame
+                } else {
+                    // The icon moves with the title when the counter comes and goes.
+                    contentTransition.updateFrame(node: iconNode, frame: iconFrame)
+                }
             }
         } else if let iconNode = self.iconNode {
             self.iconNode = nil
@@ -995,7 +1146,7 @@ private final class MainButtonNode: HighlightTrackingButtonNode {
             self.textNode.frame = textFrame
         } else {
             self.textNode.bounds = CGRect(origin: .zero, size: textFrame.size)
-            transition.updatePosition(node: self.textNode, position: textFrame.center)
+            contentTransition.updatePosition(node: self.textNode, position: textFrame.center)
         }
 
         if previousState.progress != state.progress {
@@ -2267,7 +2418,7 @@ final class AttachmentPanel: ASDisplayNode, ASScrollViewDelegate, ASGestureRecog
             case .emoji:
                 accessibilityTitle = "Emoji"
             case .audio:
-                accessibilityTitle = self.presentationData.strings.Attachment_Audio
+                accessibilityTitle = self.presentationData.strings.Music_Music
             case .link:
                 accessibilityTitle = self.presentationData.strings.Attachment_Link
             case let .app(bot):

@@ -25,6 +25,8 @@ import SearchInputPanelComponent
 import SearchBarNode
 import ChatListSearchFiltersContainerNode
 import MultilineTextComponent
+import HorizontalTabsComponent
+import PeerMessagesMediaPlaylist
 
 private enum MusicListEntryId: Hashable {
     case tabSwitch
@@ -36,6 +38,8 @@ private enum MusicListEntryId: Hashable {
     case playlistInfo
     case playlistActions
     case favoritePlaylistsTile
+    case newPlaylist
+    case emptyInfo
     case track(EngineMessage.Id)
     case artist(String)
     case playlist(Int)
@@ -57,6 +61,10 @@ private enum MusicListEntryContent {
     case playback
     case addTracks
     case favoritePlaylistsTile
+    /// New Playlist on top of the Add to Playlist sheet.
+    case newPlaylist
+    /// What an empty list of the profile's music is for.
+    case emptyInfo(String)
     /// The difference between the expanded cover and the round header, as a row: the list's inset stays the round
     /// header's, so folding the cover animates this row's height and the offset the header follows stays continuous.
     case playlistHeaderSpacer(CGFloat)
@@ -66,6 +74,12 @@ private enum MusicListEntryContent {
     case track(MusicTrack, isSelected: Bool?, isFavorite: Bool, isPicked: Bool?)
     case artist(MusicArtist)
     case playlist(MusicPlaylist, subtitle: String)
+}
+
+/// The tabs of the account's own profile music (folder tabs under the bar).
+private enum MusicProfileTab: Int32 {
+    case tracks
+    case playlists
 }
 
 /// What an open search looks through, switched by the tabs above the keyboard (Figma Search, 251:22733).
@@ -99,6 +113,8 @@ private struct MusicListEntry: Comparable, Identifiable {
     let content: MusicListEntryContent
     /// The alphabet section the row belongs to, when the list has them.
     let letter: String?
+    /// The player's state on this row (nil, playing or paused), so a play/pause redraws only the playing track's row.
+    var playingState: Bool? = nil
 
     /// Changes when the row must be redrawn.
     private var revision: String {
@@ -109,11 +125,11 @@ private struct MusicListEntry: Comparable, Identifiable {
             return ""
         case let .hubTiles(iconPlayTokens):
             return [MusicSection.Row.songs, .artists, .playlists, .favorites].map { "\(iconPlayTokens[$0] ?? 0)" }.joined(separator: " ")
-        case .playback, .addTracks, .favoritePlaylistsTile:
+        case .playback, .addTracks, .favoritePlaylistsTile, .newPlaylist:
             return ""
         case let .playlistHeaderSpacer(height):
             return "\(height)"
-        case let .playlistInfo(text):
+        case let .playlistInfo(text), let .emptyInfo(text):
             return text
         case let .playlistActions(isEmpty, isFavorite):
             return "\(isEmpty) \(isFavorite)"
@@ -127,7 +143,7 @@ private struct MusicListEntry: Comparable, Identifiable {
     }
 
     static func ==(lhs: MusicListEntry, rhs: MusicListEntry) -> Bool {
-        return lhs.index == rhs.index && lhs.stableId == rhs.stableId && lhs.letter == rhs.letter && lhs.revision == rhs.revision
+        return lhs.index == rhs.index && lhs.stableId == rhs.stableId && lhs.letter == rhs.letter && lhs.playingState == rhs.playingState && lhs.revision == rhs.revision
     }
 
     static func <(lhs: MusicListEntry, rhs: MusicListEntry) -> Bool {
@@ -189,6 +205,7 @@ final class MusicScreenNode: ASDisplayNode {
     private let library: MusicLibrary
     private let section: MusicSection
     private let picker: MusicTrackPicker?
+    private let playlistChooser: MusicPlaylistChooser?
     private let pickerPromptNode = ImmediateTextNode()
     private var pickerDisposable: Disposable?
     private let listNode = ListViewImpl()
@@ -209,9 +226,14 @@ final class MusicScreenNode: ASDisplayNode {
 
     /// Selection of tracks to remove: Edit on the tab, the check button from Settings, Select Tracks in a list's menu.
     private(set) var isSelecting = false
+    private var attachmentSelectionDisposable: Disposable?
     private var selectedTrackIds = Set<EngineMessage.Id>()
     /// Bottom actions while selecting on a pushed screen; on the tab the tab bar shows them as the controller's toolbar.
     private var selectionPanel: ComponentView<Empty>?
+    /// A playlist (screen or sheet) has no list bar, so the playing track's mini player sits in the bottom toolbar.
+    private var playlistPlaybackPanel: ComponentView<Empty>?
+    /// Editing the playlist pauses the track and puts the player away until playback resumes.
+    private var isPlaylistPlaybackPanelSuspended = false
 
     private var isTabShown = true
     private var tabShownDisposable: Disposable?
@@ -223,6 +245,7 @@ final class MusicScreenNode: ASDisplayNode {
     private let playlistNavigationTitle = ComponentView<Empty>()
     private var playlistEdgeEffectView: EdgeEffectView?
     private var playlistOwnerName: String = ""
+    private var playlistOwnerPeer: EnginePeer?
     private var playlistOwnerDisposable: Disposable?
     private var playlistCoverResourceId: EngineMediaResource.Id?
     private var playlistCoverImage: UIImage?
@@ -246,6 +269,12 @@ final class MusicScreenNode: ASDisplayNode {
     private var expandedSearchCategories = Set<MusicSearchCategory>()
     private var searchCategoriesWithMore = Set<MusicSearchCategory>()
 
+    /// The profile's music: the open tab (own profile), and another user's tracks as their profile lists them.
+    private var profileTab: MusicProfileTab = .tracks
+    private var foreignProfileTracks: [MusicTrack] = []
+    private var foreignProfileDisposable: Disposable?
+    private weak var foreignProfileSavedMusicContext: ProfileSavedMusicContext?
+
     private var playlistHeaderSpacerHeight: CGFloat {
         guard self.isPlaylistHeaderExpanded, let layout = self.validLayout else {
             return 0.0
@@ -265,12 +294,15 @@ final class MusicScreenNode: ASDisplayNode {
         self.library = library
         self.section = controller.section
         self.picker = controller.picker
+        self.playlistChooser = controller.playlistChooser
         switch controller.section {
         case .songs, .favorites:
             // Newest first, as on the hub (Figma Songs / Default); a title or artist sort adds the letters.
             self.sorting = MusicSorting(key: .dateAdded, ascending: false)
         case .playlist:
             self.sorting = MusicSorting(key: .playlistOrder, ascending: true)
+        case .profile:
+            self.sorting = MusicSorting(key: .dateAdded, ascending: false)
         case .hub, .artists, .playlists:
             self.sorting = MusicSorting(key: .title, ascending: true)
         }
@@ -284,14 +316,18 @@ final class MusicScreenNode: ASDisplayNode {
 
         if case .playlist = controller.section, controller.picker == nil {
             let headerView = MusicPlaylistHeaderView()
-            // Under the list, which takes the touches: the header only follows its offset.
-            self.view.insertSubview(headerView, belowSubview: self.listNode.view)
-            self.playlistHeaderView = headerView
             let edgeEffectView = EdgeEffectView()
             edgeEffectView.isUserInteractionEnabled = false
             self.view.addSubview(edgeEffectView)
             self.playlistEdgeEffectView = edgeEffectView
+            // Above the list and the bar's fade, as the profile's header over its scroll view: the fade never covers the
+            // cover. It takes no touches, so the list under it still scrolls.
+            self.view.addSubview(headerView)
+            self.playlistHeaderView = headerView
             self.view.addSubview(headerView.overlayView)
+            headerView.authorPressed = { [weak self] in
+                self?.openPlaylistAuthor()
+            }
 
             self.playlistOwnerDisposable = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: context.account.peerId))
             |> deliverOnMainQueue).start(next: { [weak self] peer in
@@ -299,6 +335,7 @@ final class MusicScreenNode: ASDisplayNode {
                     return
                 }
                 self.playlistOwnerName = peer.displayTitle(strings: self.presentationData.strings, displayOrder: self.presentationData.nameDisplayOrder)
+                self.playlistOwnerPeer = peer
                 self.applyNavigationScroll(transition: .immediate)
             })
             self.updatePlaylistCover()
@@ -309,6 +346,21 @@ final class MusicScreenNode: ASDisplayNode {
         }
         self.listNode.didEndScrolling = { [weak self] _ in
             self?.snapNavigationScroll()
+        }
+        if self.isPlaylistScreen {
+            // The profile's `scrollViewWillEndDragging`: a drag never rests inside the header's first 140 pt, so the avatar
+            // always finishes melting into the island, or comes back out of it, in one motion.
+            self.listNode.adjustDecelerationDistance = { [weak self] distance in
+                guard let self, self.playlistSearchQuery == nil, case let .known(offset) = self.listNode.visibleContentOffset() else {
+                    return distance
+                }
+                let snapHeight: CGFloat = 140.0
+                let target = offset + distance
+                guard target < snapHeight else {
+                    return distance
+                }
+                return (target < snapHeight * 0.5 ? 0.0 : snapHeight) - offset
+            }
         }
 
         self.indexNode.indexSelected = { [weak self] letter in
@@ -337,7 +389,15 @@ final class MusicScreenNode: ASDisplayNode {
                 return
             }
             self.playingTrack = value.map { (fileId: $0.0, isPaused: $0.1) }
-            self.updateList(allUpdated: true)
+            if self.isPlaylistPlaybackPanelSuspended, let value, !value.1 {
+                self.isPlaylistPlaybackPanelSuspended = false
+                if let layout = self.validLayout {
+                    self.containerLayoutUpdated(layout, transition: .animated(duration: 0.4, curve: .spring))
+                }
+            }
+            // Only rows whose playing state changed are redrawn: updating every row stalled the main thread
+            // for ~0.25 s on each play/pause and the mini player's icon morph skipped to its end.
+            self.updateList()
         })
         self.libraryDisposable = (library.updated.signal()
         |> deliverOnMainQueue).start(next: { [weak self] _ in
@@ -357,6 +417,30 @@ final class MusicScreenNode: ASDisplayNode {
             // Once everything has loaded, changes come from the user (delete, favorite, playlist edits) and animate.
             self.updateList(allUpdated: self.isPlaylistScreen, animated: self.library.isFullyLoaded)
         })
+        if case .profile = controller.section, let savedMusicContext = controller.profileSavedMusicContext {
+            // Another user's profile: their list turned into messages, as their profile's player gets it.
+            self.foreignProfileSavedMusicContext = savedMusicContext
+            let location = PeerMessagesPlaylistLocation.savedMusic(context: savedMusicContext, at: 0, canReorder: false)
+            if case let .custom(messages, _, _, _, _) = location.effectiveLocation(context: context) {
+                self.foreignProfileDisposable = (messages
+                |> deliverOnMainQueue).start(next: { [weak self, weak savedMusicContext] messages, _, canLoadMore in
+                    guard let self else {
+                        return
+                    }
+                    self.foreignProfileTracks = messages.map { MusicTrack(message: $0, isSaved: true) }
+                    self.updateList(animated: true)
+                    if canLoadMore {
+                        savedMusicContext?.loadMore()
+                    }
+                })
+            }
+        }
+        if let selection = controller.attachmentSelection {
+            self.attachmentSelectionDisposable = (selection.updated.signal()
+            |> deliverOnMainQueue).start(next: { [weak self] _ in
+                self?.updateList(allUpdated: true, animated: true)
+            })
+        }
         if let picker = self.picker {
             self.pickerDisposable = (picker.updated.signal()
             |> deliverOnMainQueue).start(next: { [weak self] _ in
@@ -382,11 +466,56 @@ final class MusicScreenNode: ASDisplayNode {
         self.playingDisposable?.dispose()
         self.tabShownDisposable?.dispose()
         self.pickerDisposable?.dispose()
+        self.attachmentSelectionDisposable?.dispose()
+        self.foreignProfileDisposable?.dispose()
+    }
+
+    /// The profile's music of the account itself: tracks and playlists in tabs, menus to take them out of the profile.
+    private var isOwnProfile: Bool {
+        if case let .profile(peerId) = self.section {
+            return peerId == self.context.account.peerId
+        }
+        return false
+    }
+
+    /// Another user's profile music: their tracks only, nothing to change.
+    private var isForeignProfile: Bool {
+        if case let .profile(peerId) = self.section {
+            return peerId != self.context.account.peerId
+        }
+        return false
+    }
+
+    /// The local test user's profile (concept only): music taken from this library, see `testProfileContent`.
+    private var isTestProfile: Bool {
+        if case let .profile(peerId) = self.section {
+            return peerId == musicTestChatPeerId
+        }
+        return false
+    }
+
+    /// Profiles that have playlists to show: the own one and the test user's.
+    private var hasProfileTabs: Bool {
+        return self.isOwnProfile || self.isTestProfile
+    }
+
+    private var profileTracks: [MusicTrack] {
+        if self.isTestProfile {
+            return self.library.testProfileContent().tracks
+        }
+        return self.isForeignProfile ? self.foreignProfileTracks : self.library.profileTracks
+    }
+
+    private var profilePlaylists: [MusicPlaylist] {
+        if self.isTestProfile {
+            return self.library.testProfileContent().playlists
+        }
+        return self.isOwnProfile ? self.library.profilePlaylists : []
     }
 
     /// The tab can be turned off only where the section stays reachable: the hub opened from Settings.
     private var displaysTabSwitch: Bool {
-        return self.section == .hub && self.controller?.mode == .navigation && self.picker == nil
+        return self.section == .hub && self.controller?.mode == .navigation && self.picker == nil && self.controller?.attachmentSelection == nil
     }
 
     /// Every Music screen is a plain list on one fill; tracks lie on it under Play and Shuffle (Figma Songs / Default).
@@ -399,6 +528,8 @@ final class MusicScreenNode: ASDisplayNode {
         switch self.section {
         case .hub, .songs, .favorites, .playlist:
             return true
+        case .profile:
+            return self.profileTab == .tracks
         case .artists, .playlists:
             return false
         }
@@ -409,14 +540,14 @@ final class MusicScreenNode: ASDisplayNode {
         switch self.section {
         case .songs, .favorites:
             return true
-        case .hub, .artists, .playlists, .playlist:
+        case .hub, .artists, .playlists, .playlist, .profile:
             return false
         }
     }
 
     private var hasAlphabetSections: Bool {
         switch self.section {
-        case .hub, .playlists, .playlist:
+        case .hub, .playlists, .playlist, .profile:
             return false
         case .artists:
             return self.picker == nil
@@ -462,13 +593,16 @@ final class MusicScreenNode: ASDisplayNode {
 
     /// Screens whose search switches scopes: every list under the navigation bar, outside of the track picker.
     private var usesSearchScopes: Bool {
-        if self.picker != nil {
+        if self.picker != nil || self.playlistChooser != nil {
             return false
         }
-        if case .playlist = self.section {
+        switch self.section {
+        case .playlist, .profile:
+            // The profile's music is searched in place: it is not the library the scopes look through.
             return false
+        default:
+            return true
         }
-        return true
     }
 
     private var isScopedSearchActive: Bool {
@@ -478,7 +612,7 @@ final class MusicScreenNode: ASDisplayNode {
     /// The tab a search opens on: the section it was opened from.
     private var defaultSearchScope: MusicSearchScope {
         switch self.section {
-        case .hub, .playlist:
+        case .hub, .playlist, .profile:
             return .all
         case .songs:
             return .tracks
@@ -495,15 +629,15 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         switch scope {
         case .all:
-            return musicString(strings, ru: "Все", en: "All")
+            return strings.Music_All
         case .tracks:
-            return musicString(strings, ru: "Треки", en: "Tracks")
+            return strings.Music_Tracks
         case .playlists:
-            return musicString(strings, ru: "Плейлисты", en: "Playlists")
+            return strings.Music_Playlists
         case .artists:
-            return musicString(strings, ru: "Артисты", en: "Artists")
+            return strings.Music_Artists
         case .favorites:
-            return musicString(strings, ru: "Избранное", en: "Favorites")
+            return strings.Music_Favorites
         }
     }
 
@@ -511,11 +645,11 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         switch category {
         case .playlists:
-            return musicString(strings, ru: "Плейлисты", en: "Playlists")
+            return strings.Music_Playlists
         case .artists:
-            return musicString(strings, ru: "Артисты", en: "Artists")
+            return strings.Music_Artists
         case .tracks:
-            return musicString(strings, ru: "Треки", en: "Tracks")
+            return strings.Music_Tracks
         }
     }
 
@@ -558,13 +692,13 @@ final class MusicScreenNode: ASDisplayNode {
         case .all:
             return strings.Common_Search
         case .tracks:
-            return musicString(strings, ru: "Поиск треков", en: "Search Tracks")
+            return strings.Music_SearchTracks
         case .playlists:
-            return musicString(strings, ru: "Поиск плейлистов", en: "Search Playlists")
+            return strings.Music_SearchPlaylists
         case .artists:
-            return musicString(strings, ru: "Поиск артистов", en: "Search Artists")
+            return strings.Music_SearchArtists
         case .favorites:
-            return musicString(strings, ru: "Поиск в избранном", en: "Search Favorites")
+            return strings.Music_SearchFavorites
         }
     }
 
@@ -577,9 +711,9 @@ final class MusicScreenNode: ASDisplayNode {
         let matches: (String) -> Bool = { text in
             return query.flatMap { text.lowercased().contains($0) } ?? true
         }
-        let playlistsTitle = musicString(strings, ru: "Плейлисты", en: "Playlists")
-        let artistsTitle = musicString(strings, ru: "Артисты", en: "Artists")
-        let tracksTitle = musicString(strings, ru: "Треки", en: "Tracks")
+        let playlistsTitle = strings.Music_Playlists
+        let artistsTitle = strings.Music_Artists
+        let tracksTitle = strings.Music_Tracks
 
         let playlistSorting: MusicSorting
         if case .playlists = self.section {
@@ -651,7 +785,15 @@ final class MusicScreenNode: ASDisplayNode {
         case .artists:
             appendArtists(nil)
         }
-        return contents.enumerated().map { MusicListEntry(index: $0.offset, stableId: $0.element.0, content: $0.element.1, letter: $0.element.2) }
+        return contents.enumerated().map { MusicListEntry(index: $0.offset, stableId: $0.element.0, content: $0.element.1, letter: $0.element.2, playingState: self.entryPlayingState($0.element.1)) }
+    }
+
+    /// Mirrors the playing indicator `item(entry:)` draws: paused (true), playing (false) or none.
+    private func entryPlayingState(_ content: MusicListEntryContent) -> Bool? {
+        guard case let .track(track, _, _, isPicked) = content, isPicked == nil, let playingTrack = self.playingTrack, track.file?.fileId.id == playingTrack.fileId else {
+            return nil
+        }
+        return playingTrack.isPaused
     }
 
     private func makeEntries() -> [MusicListEntry] {
@@ -663,7 +805,7 @@ final class MusicScreenNode: ASDisplayNode {
         let trackContent: (MusicTrack) -> MusicListEntryContent = { track in
             return .track(
                 track,
-                isSelected: self.isSelecting ? self.selectedTrackIds.contains(track.message.id) : nil,
+                isSelected: self.controller?.attachmentSelection.flatMap { $0.contains(track) } ?? (self.isSelecting ? self.selectedTrackIds.contains(track.message.id) : nil),
                 isFavorite: self.library.isFavorite(track),
                 isPicked: self.picker.flatMap { $0.contains(track) }
             )
@@ -721,14 +863,40 @@ final class MusicScreenNode: ASDisplayNode {
                 appendPlaybackPanel(self.currentTracks)
             }
             contents += self.currentTracks.map { (.track($0.message.id), trackContent($0), nil) }
+        case .profile:
+            let strings = self.presentationData.strings
+            let query = self.activeSearchQuery
+            if self.profileTab == .playlists && self.hasProfileTabs {
+                let playlists = self.profilePlaylists.filter { playlist in
+                    return query.flatMap { playlist.title.lowercased().contains($0) } ?? true
+                }
+                if playlists.isEmpty && query == nil && self.isOwnProfile {
+                    contents.append((.emptyInfo, .emptyInfo(strings.Music_PlaylistsYouAddToYourProfileAppearHere), nil))
+                }
+                contents += playlists.map { playlist in
+                    return (.playlist(playlist.id), .playlist(playlist, subtitle: musicPlaylistSubtitle(strings, playlist: playlist, library: self.library)), nil)
+                }
+            } else {
+                self.currentTracks = self.profileTracks.filter(self.matchesSearch)
+                if self.currentTracks.isEmpty && query == nil {
+                    let text = self.isOwnProfile ? strings.Music_TracksYouAddToYourProfileAppearHere : strings.Music_NoMusicInThisProfileYet
+                    contents.append((.emptyInfo, .emptyInfo(text), nil))
+                }
+                appendPlaybackPanel(self.currentTracks)
+                contents += self.currentTracks.map { (.track($0.message.id), trackContent($0), nil) }
+            }
         case .artists:
             contents += self.library.artists.filter { artist in
                 return self.activeSearchQuery.flatMap { artist.name.lowercased().contains($0) } ?? true
             }.map { (.artist($0.name.lowercased()), .artist($0), self.picker == nil ? musicIndexLetter($0.name) : nil) }
         case let .playlists(favoritesOnly):
             let strings = self.presentationData.strings
+            if self.playlistChooser != nil && self.activeSearchQuery == nil {
+                contents.append((.newPlaylist, .newPlaylist, nil))
+            }
+            let excludedId = self.playlistChooser?.excludedId
             contents += self.library.playlists(sorting: self.sorting).filter { playlist in
-                guard !favoritesOnly || playlist.isFavorite else {
+                guard !favoritesOnly || playlist.isFavorite, playlist.id != excludedId else {
                     return false
                 }
                 return self.activeSearchQuery.flatMap { playlist.title.lowercased().contains($0) } ?? true
@@ -739,7 +907,7 @@ final class MusicScreenNode: ASDisplayNode {
         // Tracks that left the list leave the selection too.
         let trackIds = Set(self.currentTracks.map(\.message.id))
         self.selectedTrackIds.formIntersection(trackIds)
-        return contents.enumerated().map { MusicListEntry(index: $0.offset, stableId: $0.element.0, content: $0.element.1, letter: $0.element.2) }
+        return contents.enumerated().map { MusicListEntry(index: $0.offset, stableId: $0.element.0, content: $0.element.1, letter: $0.element.2, playingState: self.entryPlayingState($0.element.1)) }
     }
 
     private var trackSource: MusicTrackSource {
@@ -750,7 +918,7 @@ final class MusicScreenNode: ASDisplayNode {
             return .favorites
         case let .playlist(id):
             return .playlist(id)
-        case .hub, .artists, .playlists:
+        case .hub, .artists, .playlists, .profile:
             return .all
         }
     }
@@ -795,6 +963,8 @@ final class MusicScreenNode: ASDisplayNode {
             return self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false))
         case .songs, .favorites:
             return self.library.tracks(source: self.trackSource, sorting: self.sorting)
+        case .profile:
+            return self.profileTracks
         default:
             return nil
         }
@@ -854,9 +1024,23 @@ final class MusicScreenNode: ASDisplayNode {
         })
     }
 
+    func forwardSelectedTracks() {
+        let tracks = self.currentTracks.filter { self.selectedTrackIds.contains($0.message.id) }
+        guard !tracks.isEmpty else {
+            return
+        }
+        self.controller?.share(tracks: tracks, completion: { [weak self] in
+            self?.setSelecting(false)
+        })
+    }
+
+    /// The chat selection panel's icons: trash for Delete, the share arrow (Figma) for sending to chats.
+    static let selectionDeleteIcon = "Chat/Input/Accessory Panels/MessageSelectionTrash"
+    static let selectionForwardIcon = "Chat/Input/Accessory Panels/MessageSelectionAction"
+
     private var selectAllTitle: String {
         let strings = self.presentationData.strings
-        return self.allTracksSelected ? musicString(strings, ru: "Снять выбор", en: "Deselect All") : musicString(strings, ru: "Выбрать все", en: "Select All")
+        return self.allTracksSelected ? strings.Music_DeselectAll : strings.Music_SelectAll
     }
 
     /// On the tab the tab bar draws the toolbar in its own place; a pushed screen draws the same panel itself.
@@ -865,9 +1049,10 @@ final class MusicScreenNode: ASDisplayNode {
             return
         }
         if controller.mode == .tab {
+            // Figma List Edit 136:6397: Delete on the left, Forward on the right, round glass icon buttons.
             let toolbar = self.isSelecting ? Toolbar(
-                leftAction: ToolbarAction(title: self.selectAllTitle, isEnabled: !self.currentTracks.isEmpty),
-                rightAction: ToolbarAction(title: self.presentationData.strings.Common_Delete, isEnabled: !self.selectedTrackIds.isEmpty),
+                leftAction: ToolbarAction(title: self.presentationData.strings.Common_Delete, isEnabled: !self.selectedTrackIds.isEmpty, icon: MusicScreenNode.selectionDeleteIcon),
+                rightAction: ToolbarAction(title: self.presentationData.strings.VoiceOver_MessageContextForward, isEnabled: !self.selectedTrackIds.isEmpty, icon: MusicScreenNode.selectionForwardIcon),
                 middleAction: nil
             ) : nil
             controller.setToolbar(toolbar, transition: .animated(duration: 0.4, curve: .spring))
@@ -880,6 +1065,66 @@ final class MusicScreenNode: ASDisplayNode {
     /// Gap between cards on every Music list: hub rows, Play/Shuffle, Add Tracks, tracks.
     static let blockSpacing: CGFloat = 24.0
     static let pickerPromptHeight: CGFloat = 22.0
+
+    /// Opening the playlist's editor pauses the playing track and hides the bottom player.
+    func suspendPlaybackForPlaylistEditing() {
+        guard self.isPlaylistScreen, let mediaPlayback = self.controller?.globalControlPanelsContextState?.mediaPlayback else {
+            return
+        }
+        self.isPlaylistPlaybackPanelSuspended = true
+        self.context.sharedContext.mediaManager.playlistControl(.playback(.pause), type: mediaPlayback.kind)
+        if let layout = self.validLayout {
+            self.containerLayoutUpdated(layout, transition: .animated(duration: 0.4, curve: .spring))
+        }
+    }
+
+    private static let playlistPlaybackPanelHeight: CGFloat = 40.0
+
+    /// The player shows in the bottom toolbar's place: not while selecting, where the toolbar holds the selection actions.
+    private var displaysPlaylistPlaybackPanel: Bool {
+        return self.isPlaylistScreen && !self.isPlaylistPlaybackPanelSuspended && !self.isSelecting && self.controller?.globalControlPanelsContextState?.mediaPlayback != nil
+    }
+
+    /// The client's mini player in its glass capsule (the same panel the list bar shows on the other Music screens), on the toolbar's line.
+    private func updatePlaylistPlaybackPanel(layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
+        if self.displaysPlaylistPlaybackPanel {
+            let panel: ComponentView<Empty>
+            var panelTransition = ComponentTransition(transition)
+            if let current = self.playlistPlaybackPanel {
+                panel = current
+            } else {
+                panel = ComponentView()
+                self.playlistPlaybackPanel = panel
+                panelTransition = .immediate
+            }
+            // The container insets its glass by 16 pt: the capsule keeps the selection toolbar's 20 pt sides.
+            let sideInset: CGFloat = 20.0 - 16.0
+            let panelSize = panel.update(
+                transition: panelTransition,
+                component: self.headerPanels(),
+                environment: {},
+                containerSize: CGSize(width: layout.size.width - sideInset * 2.0, height: 100.0)
+            )
+            if let panelView = panel.view {
+                let panelFrame = CGRect(origin: CGPoint(x: sideInset, y: layout.size.height - self.selectionPanelBottomInset(layout: layout) - panelSize.height), size: panelSize)
+                if panelView.superview == nil {
+                    self.view.addSubview(panelView)
+                    panelView.frame = panelFrame.offsetBy(dx: 0.0, dy: 16.0)
+                    panelView.alpha = 0.0
+                }
+                ComponentTransition(transition).setFrame(view: panelView, frame: panelFrame)
+                ComponentTransition(transition).setAlpha(view: panelView, alpha: 1.0)
+            }
+        } else if let panel = self.playlistPlaybackPanel {
+            self.playlistPlaybackPanel = nil
+            if let panelView = panel.view {
+                ComponentTransition(transition).setFrame(view: panelView, frame: panelView.frame.offsetBy(dx: 0.0, dy: 16.0))
+                ComponentTransition(transition).setAlpha(view: panelView, alpha: 0.0, completion: { [weak panelView] _ in
+                    panelView?.removeFromSuperview()
+                })
+            }
+        }
+    }
 
     private func selectionPanelBottomInset(layout: ContainerViewLayout) -> CGFloat {
         return max(layout.insets(options: []).bottom, 8.0)
@@ -901,23 +1146,22 @@ final class MusicScreenNode: ASDisplayNode {
             }
             let sideInset: CGFloat = 20.0
             let panelSize = CGSize(width: layout.size.width - sideInset * 2.0, height: MusicScreenNode.selectionPanelHeight)
-            let selectAllTitle = self.selectAllTitle
-            let deleteTitle = self.presentationData.strings.Common_Delete
+            let hasSelection = !self.selectedTrackIds.isEmpty
             let _ = panel.update(
                 transition: panelTransition,
                 component: AnyComponent(GlassControlPanelComponent(
                     theme: self.presentationData.theme,
                     leftItem: GlassControlPanelComponent.Item(
-                        items: [GlassControlGroupComponent.Item(id: "left_" + selectAllTitle, content: .text(selectAllTitle), action: self.currentTracks.isEmpty ? nil : { [weak self] in
-                            self?.toggleSelectAll()
-                        })],
+                        items: [GlassControlGroupComponent.Item(id: "delete", content: .icon(MusicScreenNode.selectionDeleteIcon), action: hasSelection ? { [weak self] in
+                            self?.deleteSelectedTracks()
+                        } : nil)],
                         background: .panel
                     ),
                     centralItem: nil,
                     rightItem: GlassControlPanelComponent.Item(
-                        items: [GlassControlGroupComponent.Item(id: "right_" + deleteTitle, content: .text(deleteTitle), action: self.selectedTrackIds.isEmpty ? nil : { [weak self] in
-                            self?.deleteSelectedTracks()
-                        })],
+                        items: [GlassControlGroupComponent.Item(id: "forward", content: .icon(MusicScreenNode.selectionForwardIcon), action: hasSelection ? { [weak self] in
+                            self?.forwardSelectedTracks()
+                        } : nil)],
                         background: .panel
                     ),
                     centerAlignmentIfPossible: true
@@ -959,13 +1203,24 @@ final class MusicScreenNode: ASDisplayNode {
             return ListMessageItemRevealOption(option: ItemListRevealOption(key: key, title: title, icon: icon, color: colors.fillColor, iconColor: colors.foregroundColor, textColor: theme.list.itemSecondaryTextColor, isDestructive: isDestructive, displaysTitle: false), action: action)
         }
         let left = [
-            option(0, musicString(strings, ru: "Далее", en: "Play Next"), "Chat/Context Menu/MoveUp", actions.neutral1, false, { [weak self] in
+            option(0, strings.Music_PlayNext, "Chat/Context Menu/MoveUp", actions.neutral1, false, { [weak self] in
                 self?.enqueue(track: track, next: true)
             }),
-            option(1, musicString(strings, ru: "В плейлист", en: "Add to Playlist"), "Chat/Context Menu/AddCaption", actions.warning, false, { [weak self] in
+            option(1, strings.Music_AddToPlaylist, "Chat/Context Menu/AddCaption", actions.warning, false, { [weak self] in
                 self?.addToPlaylist(track: track)
             })
         ]
+        if self.isOwnProfile {
+            // The profile's list: the destructive swipe takes the track out of the profile, Music keeps it.
+            return (left, [
+                option(4, strings.Music_RemoveFromProfile, "Music/RemoveFromProfile", actions.destructive, true, { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    self.controller?.setSavedToProfile(track: track, isSaved: false, library: self.library)
+                })
+            ])
+        }
         let right = [
             option(2, strings.Common_Edit, "Chat/Context Menu/Edit", actions.accent, false, { [weak self] in
                 guard let self else {
@@ -978,6 +1233,7 @@ final class MusicScreenNode: ASDisplayNode {
                     return
                 }
                 self.library.remove(tracks: [track])
+                self.controller?.presentRemovedFromMusicToast(count: 1)
             })
         ]
         return (left, right)
@@ -1011,7 +1267,7 @@ final class MusicScreenNode: ASDisplayNode {
         var items: [ContextMenuItem] = [
             .custom(MusicTrackActionsContextItem(actions: [
                 MusicTrackActionsContextItem.Action(
-                    title: isSavedToProfile ? musicString(strings, ru: "Убрать", en: "Remove") : musicString(strings, ru: "В профиль", en: "To Profile"),
+                    title: isSavedToProfile ? strings.Music_Remove : strings.Music_ToProfile,
                     iconName: isSavedToProfile ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic",
                     action: { [weak self] in
                         self?.controller?.setSavedToProfile(track: track, isSaved: !isSavedToProfile, library: library)
@@ -1019,14 +1275,15 @@ final class MusicScreenNode: ASDisplayNode {
                 ),
                 MusicTrackActionsContextItem.Action(
                     // The title stays: the longer "remove" wording does not fit a third of the menu.
-                    title: musicString(strings, ru: "Избранное", en: "Favorite"),
+                    title: strings.Music_Favorite,
                     iconName: isFavorite ? "Music/StarSlash" : "Music/Star",
-                    action: {
+                    action: { [weak self] in
                         library.setFavorite(track, !isFavorite)
+                        self?.controller?.presentFavoriteToast(isFavorite: !isFavorite)
                     }
                 ),
                 MusicTrackActionsContextItem.Action(
-                    title: musicString(strings, ru: "Поделиться", en: "Share"),
+                    title: strings.Music_Share,
                     iconName: "Music/ShareFilled",
                     action: { [weak self] in
                         self?.controller?.share(track: track)
@@ -1034,20 +1291,20 @@ final class MusicScreenNode: ASDisplayNode {
                 )
             ]), false),
             .separator,
-            action(musicString(strings, ru: "Редактировать", en: "Edit"), .singleLine, "Chat/Context Menu/Edit", false, { [weak self] in
+            action(strings.Music_Edit, .singleLine, "Chat/Context Menu/Edit", false, { [weak self] in
                 guard let self else {
                     return
                 }
                 self.controller?.editTrack(track, library: self.library)
             }),
             .separator,
-            action(musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"), .singleLine, "Chat/Context Menu/AddCaption", false, { [weak self] in
+            action(strings.Music_AddToPlaylist2, .singleLine, "Chat/Context Menu/AddCaption", false, { [weak self] in
                 self?.addToPlaylist(track: track)
             }),
-            action(musicString(strings, ru: "Воспроизвести далее", en: "Play Next"), .singleLine, "Chat/Context Menu/MoveUp", false, { [weak self] in
+            action(strings.Music_PlayNext2, .singleLine, "Chat/Context Menu/MoveUp", false, { [weak self] in
                 self?.enqueue(track: track, next: true)
             }),
-            action(musicString(strings, ru: "Добавить в очередь", en: "Add to Queue"), .singleLine, "Chat/Context Menu/MoveDown", false, { [weak self] in
+            action(strings.Music_AddToQueue, .singleLine, "Chat/Context Menu/MoveDown", false, { [weak self] in
                 self?.enqueue(track: track, next: false)
             })
         ]
@@ -1057,7 +1314,7 @@ final class MusicScreenNode: ASDisplayNode {
         }
         if let artist = track.artist, !isArtistList {
             items.append(.separator)
-            items.append(action(musicString(strings, ru: "Перейти к артисту", en: "Go to Artist"), .secondLineWithValue(artist), "Music/Microphone", false, { [weak self] in
+            items.append(action(strings.Music_GoToArtist, .secondLineWithValue(artist), "Music/Microphone", false, { [weak self] in
                 guard let self else {
                     return
                 }
@@ -1067,16 +1324,23 @@ final class MusicScreenNode: ASDisplayNode {
         items.append(.separator)
         if case let .playlist(playlistId) = self.section, self.picker == nil {
             // Figma 247:17292: takes the track out of this playlist only, the track stays in Music.
-            items.append(action(musicString(strings, ru: "Убрать из плейлиста", en: "Remove from Playlist"), .singleLine, "Chat/Context Menu/Remove", true, {
+            items.append(action(strings.Music_RemoveFromPlaylist, .singleLine, "Chat/Context Menu/Remove", true, {
                 let messageId = track.message.id
                 library.updatePlaylist(id: playlistId, { playlist in
                     playlist.trackIds.removeAll(where: { $0 == messageId })
                 })
             }))
         }
-        items.append(action(musicString(strings, ru: "Удалить из музыки", en: "Remove from Music"), .singleLine, "Chat/Context Menu/Delete", true, {
-            library.remove(tracks: [track])
-        }))
+        if self.isOwnProfile {
+            items.append(action(strings.Music_RemoveFromProfile, .singleLine, "Music/RemoveFromProfile", true, { [weak controller] in
+                controller?.setSavedToProfile(track: track, isSaved: false, library: library)
+            }))
+        } else {
+            items.append(action(strings.Music_RemoveFromMusic, .singleLine, "Chat/Context Menu/Delete", true, { [weak controller] in
+                library.remove(tracks: [track])
+                controller?.presentRemovedFromMusicToast(count: 1)
+            }))
+        }
 
         let contextController = makeContextController(presentationData: self.presentationData, source: .extracted(MusicTrackContextExtractedContentSource(contentNode: sourceNode)), items: .single(ContextController.Items(content: .list(items))), recognizer: nil, gesture: gesture as? ContextGesture)
         controller.presentInGlobalOverlay(contextController)
@@ -1114,10 +1378,10 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         // Rows fill first, as in Figma: Tracks, Artists, then Playlists, Favorites.
         let rows: [(MusicSection.Row, MusicHubTile.Kind, String, String)] = [
-            (.songs, .songs, musicString(strings, ru: "Треки", en: "Tracks"), "anim_sound_on"),
-            (.artists, .artists, musicString(strings, ru: "Артисты", en: "Artists"), "anim_vcspeak"),
-            (.playlists, .playlists, musicString(strings, ru: "Плейлисты", en: "Playlists"), "anim_musicplaylists"),
-            (.favorites, .favorites, musicString(strings, ru: "Избранное", en: "Favorites"), "anim_musicfavorites")
+            (.songs, .songs, strings.Music_Tracks, "anim_sound_on"),
+            (.artists, .artists, strings.Music_Artists, "anim_vcspeak"),
+            (.playlists, .playlists, strings.Music_Playlists, "anim_musicplaylists"),
+            (.favorites, .favorites, strings.Music_Favorites, "anim_musicfavorites")
         ]
         let tiles = rows.map { MusicHubTile(kind: $0.1, title: $0.2, animation: $0.3, playToken: iconPlayTokens[$0.0] ?? 0) }
         return MusicHubTilesItem(theme: self.presentationData.theme, tiles: tiles, sideInset: 16.0, topInset: self.displaysTabSwitch ? MusicScreenNode.blockSpacing : 16.0, bottomInset: self.picker != nil ? MusicScreenNode.blockSpacing : 0.0, sectionId: 1, action: { [weak self] kind in
@@ -1139,7 +1403,7 @@ final class MusicScreenNode: ASDisplayNode {
     /// The single full-width Playlists tile on top of Favorites: opens the favorite playlists.
     private func favoritePlaylistsTileItem() -> ListViewItem {
         let strings = self.presentationData.strings
-        let tile = MusicHubTile(kind: .playlists, title: musicString(strings, ru: "Плейлисты", en: "Playlists"), animation: "anim_musicplaylists", playToken: 0)
+        let tile = MusicHubTile(kind: .playlists, title: strings.Music_Playlists, animation: "anim_musicplaylists", playToken: 0)
         return MusicHubTilesItem(theme: self.presentationData.theme, tiles: [tile], sideInset: 16.0, topInset: 16.0, sectionId: 1, action: { [weak self] _ in
             guard let self else {
                 return
@@ -1150,7 +1414,7 @@ final class MusicScreenNode: ASDisplayNode {
 
     private func tabSwitchItem(isOn: Bool) -> ListViewItem {
         let strings = self.presentationData.strings
-        return MusicGlassSwitchItem(presentationData: ItemListPresentationData(self.presentationData), title: musicString(strings, ru: "Вкладка «Музыка»", en: "Music Tab"), value: isOn, sideInset: 16.0, topInset: 16.0, sectionId: 0, updated: { [weak self] value in
+        return MusicGlassSwitchItem(presentationData: ItemListPresentationData(self.presentationData), title: strings.Music_MusicTab, value: isOn, sideInset: 16.0, topInset: 16.0, sectionId: 0, updated: { [weak self] value in
             guard let self else {
                 return
             }
@@ -1161,7 +1425,7 @@ final class MusicScreenNode: ASDisplayNode {
 
     private func tabFooterItem() -> ListViewItem {
         let strings = self.presentationData.strings
-        return ItemListTextItem(presentationData: ItemListPresentationData(self.presentationData), text: .plain(musicString(strings, ru: "Для перехода к музыке из главного меню.", en: "To open your music from the main menu.")), sectionId: 0, style: .blocks, additionalInsets: UIEdgeInsets(top: 0.0, left: 16.0, bottom: 0.0, right: 16.0))
+        return ItemListTextItem(presentationData: ItemListPresentationData(self.presentationData), text: .plain(strings.Music_ToOpenYourMusicFromMainMenu), sectionId: 0, style: .blocks, additionalInsets: UIEdgeInsets(top: 0.0, left: 16.0, bottom: 0.0, right: 16.0))
     }
 
     private func trackItem(track: MusicTrack, isSelected: Bool?, isFavorite: Bool, isPicked: Bool?, header: ListViewItemHeader?) -> ListViewItem {
@@ -1171,7 +1435,7 @@ final class MusicScreenNode: ASDisplayNode {
             self?.play(message: message)
             return true
         }, openMessageContextMenu: { [weak self] message, _, node, _, gesture in
-            guard let self, !self.isSelecting, self.picker == nil, let track = self.track(message: message) else {
+            guard let self, !self.isSelecting, self.picker == nil, !self.isForeignProfile, let track = self.track(message: message) else {
                 return
             }
             self.presentContextMenu(track: track, node: node, gesture: gesture)
@@ -1180,6 +1444,10 @@ final class MusicScreenNode: ASDisplayNode {
         }, toggleMessagesSelection: { [weak self] ids, isSelected in
             // A row can report one tap twice; the value it asks for makes the second report a no-op.
             guard let self, let id = ids.first, let track = self.currentTracks.first(where: { $0.message.id == id }) else {
+                return
+            }
+            if let selection = self.controller?.attachmentSelection {
+                selection.set(track, isSelected: isSelected)
                 return
             }
             self.setSelected(track: track, isSelected)
@@ -1199,7 +1467,7 @@ final class MusicScreenNode: ASDisplayNode {
         if let isSelected {
             selection = .selectable(selected: isSelected, num: nil)
         }
-        let revealOptions = isSelected == nil && isPicked == nil ? self.revealOptions(track: track) : (left: [], right: [])
+        let revealOptions = isSelected == nil && isPicked == nil && !self.isForeignProfile ? self.revealOptions(track: track) : (left: [], right: [])
         var editControl: ListMessageItemEditControl?
         if let isPicked {
             let theme = presentationData.theme
@@ -1209,17 +1477,18 @@ final class MusicScreenNode: ASDisplayNode {
                 })
             }
         }
-        let trailingIcon = isFavorite && isPicked == nil && isSelected == nil ? MusicResources.favoriteMark(theme: presentationData.theme) : nil
+        let isAttachment = self.controller?.attachmentSelection != nil
+        let trailingIcon = isFavorite && isPicked == nil && (isSelected == nil || isAttachment) ? MusicResources.favoriteMark(theme: presentationData.theme) : nil
         var playingIndicator: ListMessageItemPlayingIndicator?
         if isPicked == nil, let playingTrack = self.playingTrack, track.file?.fileId.id == playingTrack.fileId {
             playingIndicator = playingTrack.isPaused ? .paused : .playing
         }
         // Play and Shuffle keep the space above the first track; a letter further down follows the previous row directly (Figma Songs / Sort).
         let blockTopInset: CGFloat = 0.0
-        return ListMessageItem(presentationData: chatPresentationData, systemStyle: .glass, context: self.context, chatLocation: .peer(id: message.id.peerId), interaction: interaction, message: message, selection: selection, selectionSide: .left, displayHeader: false, customHeader: header, isGlobalSearchResult: !track.isSaved, isSavedMusic: track.isSaved, displayFileInfo: true, audioInfo: .performer, hidesAudioFileExtension: true, additionalSideInset: 0.0, blockTopInset: blockTopInset, displayBackground: false, leftRevealOptions: revealOptions.left, rightRevealOptions: revealOptions.right, trailingIcon: trailingIcon, editControl: editControl, displaysAudioCover: true, playingIndicator: playingIndicator, style: .plain, sectionId: sectionId)
+        return ListMessageItem(presentationData: chatPresentationData, systemStyle: .glass, context: self.context, chatLocation: .peer(id: message.id.peerId), interaction: interaction, message: message, selection: selection, selectionSide: .left, displayHeader: false, customHeader: header, isGlobalSearchResult: !track.isSaved, isSavedMusic: track.isSaved, selectsOnControlOnly: isAttachment, displayFileInfo: true, audioInfo: .performer, hidesAudioFileExtension: true, additionalSideInset: 0.0, blockTopInset: blockTopInset, displayBackground: false, leftRevealOptions: revealOptions.left, rightRevealOptions: revealOptions.right, trailingIcon: trailingIcon, editControl: editControl, displaysAudioCover: true, playingIndicator: playingIndicator, style: .plain, sectionId: sectionId)
     }
 
-    private func nameRowItem(id: String, name: String, subtitle: String? = nil, isFavorite: Bool = false, isLarge: Bool = false, isMedium: Bool = false, cover: TelegramMediaImageRepresentation? = nil, header: ListViewItemHeader?, contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = nil, action: @escaping () -> Void) -> ListViewItem {
+    private func nameRowItem(id: String, name: String, subtitle: String? = nil, isFavorite: Bool = false, isLarge: Bool = false, isMedium: Bool = false, cover: TelegramMediaImageRepresentation? = nil, header: ListViewItemHeader?, isSelected: Bool? = nil, selectionAction: (() -> Void)? = nil, contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = nil, action: @escaping () -> Void) -> ListViewItem {
         let presentationData = self.presentationData
         var status: ContactsPeerItemStatus = .none
         if let subtitle {
@@ -1233,7 +1502,7 @@ final class MusicScreenNode: ASDisplayNode {
         } else {
             peer = .deviceContact(stableId: id, contact: DeviceContactBasicData(firstName: name, lastName: "", phoneNumbers: []))
         }
-        return ContactsPeerItem(presentationData: ItemListPresentationData(presentationData), systemStyle: .glass, sectionId: 1, sortOrder: presentationData.nameSortOrder, displayOrder: presentationData.nameDisplayOrder, context: self.context, peerMode: .peer, peer: peer, status: status, enabled: true, selection: .none, editing: ContactsPeerItemEditing(editable: false, editing: false, revealed: false), index: nil, header: header, hideBackground: true, action: { [weak self] _ in
+        return ContactsPeerItem(presentationData: ItemListPresentationData(presentationData), systemStyle: .glass, sectionId: 1, sortOrder: presentationData.nameSortOrder, displayOrder: presentationData.nameDisplayOrder, context: self.context, peerMode: .peer, peer: peer, status: status, enabled: true, selection: isSelected.flatMap { .selectable(selected: $0) } ?? .none, selectionPosition: .left, editing: ContactsPeerItemEditing(editable: false, editing: false, revealed: false), index: nil, header: header, hideBackground: true, action: { [weak self] _ in
             // As in the client's contact lists: the pressed fill goes away once the row opens its screen.
             self?.listNode.clearHighlightAnimated(true)
             action()
@@ -1244,24 +1513,35 @@ final class MusicScreenNode: ASDisplayNode {
         }, arrowAction: { [weak self] in
             self?.listNode.clearHighlightAnimated(true)
             action()
-        }, arrowIsDisclosure: true, trailingIcon: isFavorite ? MusicResources.favoriteMark(theme: presentationData.theme) : nil, isLarge: isLarge, isMedium: isMedium)
+        }, arrowIsDisclosure: true, trailingIcon: isFavorite ? MusicResources.favoriteMark(theme: presentationData.theme) : nil, selectionAction: selectionAction, isLarge: isLarge, isMedium: isMedium)
     }
 
     private func playbackItem() -> ListViewItem {
         let strings = self.presentationData.strings
-        return MusicPlaybackButtonsItem(theme: self.presentationData.theme, playTitle: musicString(strings, ru: "Слушать", en: "Play"), shuffleTitle: musicString(strings, ru: "Перемешать", en: "Shuffle"), sideInset: 16.0, topInset: self.section == .hub || self.section == .favorites ? MusicScreenNode.blockSpacing : 16.0, bottomInset: 16.0, sectionId: 3, action: { [weak self] shuffled in
+        return MusicPlaybackButtonsItem(theme: self.presentationData.theme, playTitle: strings.Music_Play2, shuffleTitle: strings.Music_Shuffle, sideInset: 16.0, topInset: self.section == .hub || self.section == .favorites ? MusicScreenNode.blockSpacing : 16.0, bottomInset: 16.0, sectionId: 3, action: { [weak self] shuffled in
             self?.playAll(shuffled: shuffled)
         })
     }
 
     private func addTracksItem() -> ListViewItem {
         let strings = self.presentationData.strings
-        return ItemListDisclosureItem(presentationData: ItemListPresentationData(self.presentationData), systemStyle: .glass, icon: PresentationResourcesItemList.plusIconImage(self.presentationData.theme), title: musicString(strings, ru: "Добавить треки", en: "Add Tracks"), titleColor: .accent, label: "", sectionId: 4, style: .blocks, disclosureStyle: .none, additionalSideInset: 16.0, blockTopInset: MusicScreenNode.blockSpacing, action: { [weak self] in
+        return ItemListDisclosureItem(presentationData: ItemListPresentationData(self.presentationData), systemStyle: .glass, icon: PresentationResourcesItemList.plusIconImage(self.presentationData.theme), title: strings.Music_AddTracks, titleColor: .accent, label: "", sectionId: 4, style: .blocks, disclosureStyle: .none, additionalSideInset: 16.0, blockTopInset: MusicScreenNode.blockSpacing, action: { [weak self] in
             guard let self, let playlist = self.currentPlaylist else {
                 return
             }
             self.controller?.addTracks(to: playlist, library: self.library)
         })
+    }
+
+    /// The author's profile, pushed over the playlist: inside the sheet when the playlist was opened from a chat.
+    private func openPlaylistAuthor() {
+        guard let peer = self.playlistOwnerPeer, let navigationController = self.controller?.navigationController as? NavigationController else {
+            return
+        }
+        guard let infoController = self.context.sharedContext.makePeerInfoController(context: self.context, updatedPresentationData: nil, peer: peer, mode: .generic, avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil) else {
+            return
+        }
+        navigationController.pushViewController(infoController)
     }
 
     /// The playlist's own screen, as opposed to the list the track picker pushes.
@@ -1277,8 +1557,8 @@ final class MusicScreenNode: ASDisplayNode {
         let hasDescription = !(self.currentPlaylist?.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         // The round header already ends 16 pt under the name; under the cover and the description the buttons keep 16 pt of their own.
         let topInset: CGFloat = self.picker != nil ? 16.0 : (!hasDescription && !self.isPlaylistHeaderExpanded ? 8.0 : 16.0)
-        let pickerTitles: (add: String, search: String)? = self.picker != nil ? (musicString(strings, ru: "Добавить", en: "Add"), musicString(strings, ru: "Поиск", en: "Search")) : nil
-        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, playTitle: musicString(strings, ru: "Слушать", en: "Play"), addTracksTitle: musicString(strings, ru: "Добавить треки", en: "Add Tracks"), pickerTitles: pickerTitles, topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
+        let pickerAddTitle: String? = self.picker != nil ? strings.Music_AddThisPlaylist : nil
+        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, playTitle: strings.Music_Play2, addTracksTitle: strings.Music_AddTracks, pickerAddTitle: pickerAddTitle, topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
             guard let self, let playlist = self.currentPlaylist else {
                 return
             }
@@ -1290,10 +1570,7 @@ final class MusicScreenNode: ASDisplayNode {
             case .favorite:
                 self.controller?.setFavorite(playlist: playlist, isFavorite: !playlist.isFavorite, library: self.library)
             case .search:
-                // Inside the track picker the search has no panel yet (stub, like the nav bar's field).
-                if self.picker == nil {
-                    self.setPlaylistSearchActive(true)
-                }
+                self.setPlaylistSearchActive(true)
             case .addTracks:
                 self.controller?.addTracks(to: playlist, library: self.library)
             case .addAll:
@@ -1374,21 +1651,21 @@ final class MusicScreenNode: ASDisplayNode {
         let items: [ContextMenuItem] = [
             .custom(MusicTrackActionsContextItem(actions: [
                 MusicTrackActionsContextItem.Action(
-                    title: playlist.isInProfile ? musicString(strings, ru: "Убрать", en: "Remove") : musicString(strings, ru: "В профиль", en: "To Profile"),
+                    title: playlist.isInProfile ? strings.Music_Remove : strings.Music_ToProfile,
                     iconName: playlist.isInProfile ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic",
                     action: { [weak controller] in
                         controller?.setInProfile(playlist: playlist, isInProfile: !playlist.isInProfile, library: library)
                     }
                 ),
                 MusicTrackActionsContextItem.Action(
-                    title: playlist.isFavorite ? musicString(strings, ru: "Убрать", en: "Unfavorite") : musicString(strings, ru: "Избранное", en: "Favorite"),
+                    title: playlist.isFavorite ? strings.Music_Unfavorite : strings.Music_Favorite,
                     iconName: playlist.isFavorite ? "Music/StarSlash" : "Music/Star",
                     action: { [weak controller] in
                         controller?.setFavorite(playlist: playlist, isFavorite: !playlist.isFavorite, library: library)
                     }
                 ),
                 MusicTrackActionsContextItem.Action(
-                    title: musicString(strings, ru: "Поделиться", en: "Share"),
+                    title: strings.Music_Share,
                     iconName: "Music/ShareFilled",
                     action: { [weak controller] in
                         controller?.share(playlist: playlist, library: library)
@@ -1396,28 +1673,30 @@ final class MusicScreenNode: ASDisplayNode {
                 )
             ]), false),
             .separator,
-            action(musicString(strings, ru: "Редактировать", en: "Edit"), "Chat/Context Menu/Edit", false, { [weak controller] in
+            action(strings.Music_Edit, "Chat/Context Menu/Edit", false, { [weak controller] in
                 controller?.editPlaylist(playlist, library: library)
             }),
             .separator,
-            action(musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"), "Chat/Context Menu/AddCaption", false, { [weak controller] in
+            action(strings.Music_AddToPlaylist2, "Chat/Context Menu/AddCaption", false, { [weak controller] in
                 controller?.addToPlaylist(tracks: library.tracks(of: playlist), excluding: playlist.id, library: library)
             }),
-            action(musicString(strings, ru: "Воспроизвести далее", en: "Play Next"), "Chat/Context Menu/MoveUp", false, { [weak controller] in
+            action(strings.Music_PlayNext2, "Chat/Context Menu/MoveUp", false, { [weak controller] in
                 controller?.enqueue(playlist: playlist, next: true, library: library)
             }),
-            action(musicString(strings, ru: "Добавить в очередь", en: "Add to Queue"), "Chat/Context Menu/MoveDown", false, { [weak controller] in
+            action(strings.Music_AddToQueue, "Chat/Context Menu/MoveDown", false, { [weak controller] in
                 controller?.enqueue(playlist: playlist, next: false, library: library)
             }),
             .separator,
-            action(musicString(strings, ru: "Воспроизвести", en: "Play"), "Chat/Context Menu/Play", false, { [weak controller] in
+            action(strings.Music_Play, "Chat/Context Menu/Play", false, { [weak controller] in
                 controller?.play(playlist: playlist, shuffled: false, library: library)
             }),
-            action(musicString(strings, ru: "Перемешать", en: "Shuffle"), "Music/Shuffle", false, { [weak controller] in
+            action(strings.Music_Shuffle, "Music/Shuffle", false, { [weak controller] in
                 controller?.play(playlist: playlist, shuffled: true, library: library)
             }),
             .separator,
-            action(musicString(strings, ru: "Удалить из музыки", en: "Remove from Music"), "Chat/Context Menu/Delete", true, { [weak controller] in
+            self.isOwnProfile ? action(strings.Music_RemoveFromProfile, "Music/RemoveFromProfile", true, { [weak controller] in
+                controller?.setInProfile(playlist: playlist, isInProfile: false, library: library)
+            }) : action(strings.Music_RemoveFromMusic, "Chat/Context Menu/Delete", true, { [weak controller] in
                 controller?.confirmRemoval(playlist: playlist, library: library)
             })
         ]
@@ -1452,10 +1731,19 @@ final class MusicScreenNode: ASDisplayNode {
             return self.playbackItem()
         case .addTracks:
             return self.addTracksItem()
+        case .newPlaylist:
+            return MusicAddTracksButtonItem(theme: self.presentationData.theme, title: self.presentationData.strings.Music_NewPlaylist2, sideInset: 16.0, topInset: 0.0, bottomInset: 16.0, sectionId: 1, action: { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.controller?.createPlaylistFromChooser(library: self.library)
+            })
+        case let .emptyInfo(text):
+            return ItemListTextItem(presentationData: ItemListPresentationData(self.presentationData), text: .plain(text), sectionId: 0, style: .blocks, additionalInsets: UIEdgeInsets(top: 16.0, left: 16.0, bottom: 0.0, right: 16.0))
         case let .playlistHeaderSpacer(height):
             return MusicPlaylistSpacerItem(height: height)
         case let .playlistInfo(text):
-            return MusicPlaylistInfoItem(presentationData: ItemListPresentationData(self.presentationData), label: musicString(self.presentationData.strings, ru: "описание", en: "description"), text: text, sectionId: 4)
+            return MusicPlaylistInfoItem(presentationData: ItemListPresentationData(self.presentationData), label: self.presentationData.strings.Music_Description2, text: text, sectionId: 4)
         case let .playlistActions(isEmpty, isFavorite):
             return self.playlistActionsItem(isEmpty: isEmpty, isFavorite: isFavorite)
         case let .track(track, isSelected, isFavorite, isPicked):
@@ -1471,14 +1759,27 @@ final class MusicScreenNode: ASDisplayNode {
                 self.controller?.open(section: .songs(artist: artist.name), library: self.library)
             })
         case let .playlist(playlist, subtitle):
-            let contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = self.picker == nil ? { [weak self] node, gesture in
+            let contextAction: ((ASDisplayNode, ContextGesture?) -> Void)? = self.picker == nil && self.playlistChooser == nil && !self.isForeignProfile ? { [weak self] node, gesture in
                 guard let self, let playlist = self.library.playlist(id: playlist.id) else {
                     return
                 }
                 self.presentContextMenu(playlist: playlist, node: node, gesture: gesture)
             } : nil
-            return self.nameRowItem(id: "\(playlist.id)", name: playlist.title, subtitle: subtitle, isFavorite: playlist.isFavorite, isLarge: true, cover: playlist.cover, header: header, contextAction: contextAction, action: { [weak self] in
+            // In the attachment menu the checkmark's column picks the playlist for sending; the row still opens it.
+            var selectionAction: (() -> Void)?
+            var isSelected: Bool?
+            if let selection = self.controller?.attachmentSelection, self.playlistChooser == nil {
+                isSelected = selection.contains(playlistId: playlist.id)
+                selectionAction = { [weak selection] in
+                    selection?.toggle(playlistId: playlist.id)
+                }
+            }
+            return self.nameRowItem(id: "\(playlist.id)", name: playlist.title, subtitle: subtitle, isFavorite: playlist.isFavorite, isLarge: true, cover: playlist.cover, header: header, isSelected: isSelected, selectionAction: selectionAction, contextAction: contextAction, action: { [weak self] in
                 guard let self else {
+                    return
+                }
+                if self.playlistChooser != nil {
+                    self.controller?.choosePlaylist(playlist)
                     return
                 }
                 if self.isScopedSearchActive {
@@ -1489,7 +1790,7 @@ final class MusicScreenNode: ASDisplayNode {
         }
     }
 
-    private func updateList(allUpdated: Bool = false, scrollToTop: Bool = false, animated: Bool = false) {
+    private func updateList(allUpdated: Bool = false, scrollToTop: Bool = false, keepingTopOffset: CGFloat? = nil, animated: Bool = false) {
         guard self.validLayout != nil else {
             return
         }
@@ -1500,6 +1801,8 @@ final class MusicScreenNode: ASDisplayNode {
         var scrollToItem: ListViewScrollToItem?
         if scrollToTop && !entries.isEmpty {
             scrollToItem = ListViewScrollToItem(index: 0, position: .top(-self.navigationScrollOffset), animated: false, curve: .Default(duration: nil), directionHint: .Up)
+        } else if let keepingTopOffset, !entries.isEmpty {
+            scrollToItem = ListViewScrollToItem(index: 0, position: .top(-keepingTopOffset), animated: false, curve: .Default(duration: nil), directionHint: .Up)
         }
         self.listNode.transaction(
             deleteIndices: deleteIndices.map { ListViewDeleteItem(index: $0, directionHint: nil) },
@@ -1551,17 +1854,17 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         switch key {
         case .title:
-            return musicString(strings, ru: "Название", en: "Title")
+            return strings.Music_Title
         case .dateAdded:
-            return musicString(strings, ru: "Дата добавления", en: "Date Added")
+            return strings.Music_DateAdded
         case .artist:
-            return musicString(strings, ru: "Артист", en: "Artist")
+            return strings.Music_Artist3
         case .lastPlayed:
-            return musicString(strings, ru: "Последнее воспроизведение", en: "Last Played")
+            return strings.Music_LastPlayed
         case .dateUpdated:
-            return musicString(strings, ru: "Дата обновления", en: "Date Updated")
+            return strings.Music_DateUpdated
         case .playlistOrder:
-            return musicString(strings, ru: "Порядок плейлиста", en: "Playlist Order")
+            return strings.Music_PlaylistOrder
         }
     }
 
@@ -1569,11 +1872,11 @@ final class MusicScreenNode: ASDisplayNode {
         let strings = self.presentationData.strings
         switch self.sorting.key {
         case .title, .artist:
-            return self.sorting.ascending ? musicString(strings, ru: "А—Я", en: "A—Z") : musicString(strings, ru: "Я—А", en: "Z—A")
+            return self.sorting.ascending ? strings.Music_AZ : strings.Music_ZA
         case .playlistOrder:
-            return self.sorting.ascending ? musicString(strings, ru: "Как добавлены", en: "As Added") : musicString(strings, ru: "В обратном порядке", en: "Reversed")
+            return self.sorting.ascending ? strings.Music_AsAdded : strings.Music_Reversed
         case .dateAdded, .lastPlayed, .dateUpdated:
-            return self.sorting.ascending ? musicString(strings, ru: "Сначала старые", en: "Oldest First") : musicString(strings, ru: "Сначала новые", en: "Newest First")
+            return self.sorting.ascending ? strings.Music_OldestFirst : strings.Music_NewestFirst
         }
     }
 
@@ -1593,7 +1896,7 @@ final class MusicScreenNode: ASDisplayNode {
         var items: [ContextMenuItem] = []
         if self.listsTracks {
             let strings = self.presentationData.strings
-            items.append(.action(ContextMenuActionItem(text: musicString(strings, ru: "Выбрать треки", en: "Select Tracks"), icon: { theme in
+            items.append(.action(ContextMenuActionItem(text: strings.Music_SelectTracks, icon: { theme in
                 return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Select"), color: theme.contextMenu.primaryColor)
             }, iconPosition: .left, action: { [weak self] _, f in
                 f(.default)
@@ -1637,19 +1940,19 @@ final class MusicScreenNode: ASDisplayNode {
         }
         let hasTracks = !library.tracks(of: playlist).isEmpty
         var items: [ContextMenuItem] = [
-            playlist.isInProfile ? action(musicString(strings, ru: "Убрать из профиля", en: "Remove from Profile"), "Chat/Context Menu/Remove", false, { [weak controller] in
+            playlist.isInProfile ? action(strings.Music_RemoveFromProfile, "Chat/Context Menu/Remove", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: false, library: library)
-            }) : action(musicString(strings, ru: "Добавить в профиль", en: "Add to Profile"), "Music/AddToProfile", false, { [weak controller] in
+            }) : action(strings.Music_AddToProfile, "Music/AddToProfile", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: true, library: library)
             }),
             .separator,
-            action(musicString(strings, ru: "Редактировать", en: "Edit"), "Chat/Context Menu/Edit", false, { [weak controller] in
+            action(strings.Music_Edit, "Chat/Context Menu/Edit", false, { [weak controller] in
                 controller?.editPlaylist(playlist, library: library)
             })
         ]
         if hasTracks {
             // Sorting opens as a submenu, the way the client's menus step into a second level.
-            items.append(.action(ContextMenuActionItem(text: musicString(strings, ru: "Сортировка", en: "Sort"), icon: { theme in
+            items.append(.action(ContextMenuActionItem(text: strings.Music_Sort, icon: { theme in
                 return generateTintedImage(image: UIImage(bundleImageName: "Music/Sort"), color: theme.contextMenu.primaryColor)
             }, additionalLeftIcon: { theme in
                 return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Arrow"), color: theme.contextMenu.primaryColor)
@@ -1660,18 +1963,18 @@ final class MusicScreenNode: ASDisplayNode {
                 menu?.pushItems(items: .single(ContextController.Items(content: .list(self.playlistSortItems()))))
             })))
             items.append(.separator)
-            items.append(action(musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"), "Chat/Context Menu/AddCaption", false, { [weak controller] in
+            items.append(action(strings.Music_AddToPlaylist2, "Chat/Context Menu/AddCaption", false, { [weak controller] in
                 controller?.addToPlaylist(tracks: library.tracks(of: playlist), excluding: playlist.id, library: library)
             }))
-            items.append(action(musicString(strings, ru: "Воспроизвести далее", en: "Play Next"), "Chat/Context Menu/MoveUp", false, { [weak controller] in
+            items.append(action(strings.Music_PlayNext2, "Chat/Context Menu/MoveUp", false, { [weak controller] in
                 controller?.enqueue(playlist: playlist, next: true, library: library)
             }))
-            items.append(action(musicString(strings, ru: "Добавить в очередь", en: "Add to Queue"), "Chat/Context Menu/MoveDown", false, { [weak controller] in
+            items.append(action(strings.Music_AddToQueue, "Chat/Context Menu/MoveDown", false, { [weak controller] in
                 controller?.enqueue(playlist: playlist, next: false, library: library)
             }))
         }
         items.append(.separator)
-        items.append(action(musicString(strings, ru: "Удалить из музыки", en: "Remove from Music"), "Chat/Context Menu/Delete", true, { [weak controller] in
+        items.append(action(strings.Music_RemoveFromMusic, "Chat/Context Menu/Delete", true, { [weak controller] in
             controller?.confirmRemoval(playlist: playlist, library: library)
         }))
         let contextController = makeContextController(presentationData: self.presentationData, source: .reference(MusicContextReferenceContentSource(sourceView: sourceView)), items: .single(ContextController.Items(content: .list(items))), gesture: nil)
@@ -1744,16 +2047,16 @@ final class MusicScreenNode: ASDisplayNode {
             title = musicSectionTitle(strings: strings)
             rightButtons = self.controller?.mode == .tab ? [addButton] : [addButton, selectButton]
         case let .songs(artist):
-            title = artist ?? musicString(strings, ru: "Треки", en: "Tracks")
+            title = artist ?? strings.Music_Tracks
             rightButtons = [addButton, sortButton]
         case .favorites:
-            title = musicString(strings, ru: "Избранное", en: "Favorites")
+            title = strings.Music_Favorites
             rightButtons = [sortButton]
         case .artists:
-            title = musicString(strings, ru: "Артисты", en: "Artists")
+            title = strings.Music_Artists
             rightButtons = []
         case .playlists:
-            title = musicString(strings, ru: "Плейлисты", en: "Playlists")
+            title = self.playlistChooser != nil ? strings.Music_AddToPlaylist2 : strings.Music_Playlists
             rightButtons = [
                 sortButton,
                 NavigationBarComponent.Button(id: "create", content: .icon(imageName: "Chat List/AddIcon"), action: { [weak self] _ in
@@ -1763,16 +2066,24 @@ final class MusicScreenNode: ASDisplayNode {
                     self.controller?.createPlaylist(library: self.library, completion: nil)
                 })
             ]
+        case .profile:
+            title = musicProfileLibraryTitle(strings: strings)
+            rightButtons = []
         case .playlist:
-            title = self.currentPlaylist?.title ?? musicString(strings, ru: "Плейлист", en: "Playlist")
+            title = self.currentPlaylist?.title ?? strings.Music_Playlist
             rightButtons = [
-                NavigationBarComponent.Button(id: "editPlaylist", content: .text(title: musicString(strings, ru: "Изм.", en: "Edit"), isBold: false), action: { [weak self] _ in
+                NavigationBarComponent.Button(id: "editPlaylist", content: .text(title: strings.Music_Edit2, isBold: false), action: { [weak self] _ in
                     guard let self, let playlist = self.currentPlaylist else {
                         return
                     }
                     self.controller?.editPlaylist(playlist, library: self.library)
                 })
             ]
+        }
+
+        if self.controller?.attachmentSelection != nil {
+            // In the attachment menu every list selects already.
+            rightButtons.removeAll(where: { $0.id == AnyHashable("select") })
         }
 
         var leftButton: NavigationBarComponent.Button?
@@ -1787,6 +2098,16 @@ final class MusicScreenNode: ASDisplayNode {
             backPressed = { [weak self] in
                 self?.controller?.goBack()
             }
+        } else if self.playlistChooser != nil {
+            // Add to Playlist: New Playlist is the list's first row; the sheet closes with Cancel.
+            rightButtons = [sortButton]
+            leftButton = NavigationBarComponent.Button(
+                id: "cancel",
+                content: .text(title: strings.Common_Cancel, isBold: false),
+                action: { [weak self] _ in
+                    self?.controller?.closePlaylistChooser()
+                }
+            )
         } else if self.isSelecting {
             rightButtons = []
             leftButton = NavigationBarComponent.Button(
@@ -1796,14 +2117,17 @@ final class MusicScreenNode: ASDisplayNode {
                     self?.setSelecting(false)
                 }
             )
-        } else if self.controller?.mode == .tab {
+        } else if let close = self.controller?.attachmentClose {
             leftButton = NavigationBarComponent.Button(
-                id: "edit",
-                content: .text(title: strings.Common_Edit, isBold: false),
-                action: { [weak self] _ in
-                    self?.setSelecting(true)
+                id: "close",
+                content: .icon(imageName: "Navigation/Close"),
+                action: { _ in
+                    close()
                 }
             )
+        } else if self.controller?.mode == .tab {
+            // Figma Music / Default 86:7448: the check icon from the Settings hub replaces Edit.
+            leftButton = selectButton
         } else {
             backPressed = { [weak self] in
                 self?.controller?.goBack()
@@ -1821,7 +2145,7 @@ final class MusicScreenNode: ASDisplayNode {
                     maximumNumberOfLines: 1
                 ))),
                 AnyComponentWithIdentity(id: "subtitle", component: AnyComponent(MultilineTextComponent(
-                    text: .plain(NSAttributedString(string: musicString(strings, ru: "Избранное", en: "Favorites"), font: Font.regular(13.0), textColor: listTheme.itemSecondaryTextColor)),
+                    text: .plain(NSAttributedString(string: strings.Music_Favorites, font: Font.regular(13.0), textColor: listTheme.itemSecondaryTextColor)),
                     maximumNumberOfLines: 1
                 )))
             ], spacing: 1.0))
@@ -1857,7 +2181,7 @@ final class MusicScreenNode: ASDisplayNode {
             self.addSubnode(self.pickerPromptNode)
         }
         self.view.bringSubviewToFront(self.pickerPromptNode.view)
-        self.pickerPromptNode.attributedText = NSAttributedString(string: musicString(strings, ru: "Добавить в «\(picker.playlistTitle)»", en: "Add to “\(picker.playlistTitle)”"), font: Font.regular(12.0), textColor: theme.rootController.navigationBar.primaryTextColor)
+        self.pickerPromptNode.attributedText = NSAttributedString(string: strings.Music_AddTo(picker.playlistTitle).string, font: Font.regular(12.0), textColor: theme.rootController.navigationBar.primaryTextColor)
         let size = self.pickerPromptNode.updateLayout(CGSize(width: layout.size.width - 120.0, height: 20.0))
         self.pickerPromptNode.frame = CGRect(origin: CGPoint(x: floor((layout.size.width - size.width) / 2.0), y: (layout.navigationBarStatusBarHeight ?? 0.0) + 12.0), size: size)
     }
@@ -1868,15 +2192,17 @@ final class MusicScreenNode: ASDisplayNode {
         case .hub:
             return nil
         case .songs:
-            return musicString(strings, ru: "Поиск треков", en: "Search Tracks")
+            return strings.Music_SearchTracks
         case .favorites:
-            return musicString(strings, ru: "Поиск в избранном", en: "Search Favorites")
+            return strings.Music_SearchFavorites
         case .artists:
-            return musicString(strings, ru: "Поиск артистов", en: "Search Artists")
+            return strings.Music_SearchArtists
         case .playlists:
-            return musicString(strings, ru: "Поиск плейлистов", en: "Search Playlists")
+            return strings.Music_SearchPlaylists
         case .playlist:
-            return musicString(strings, ru: "Поиск в плейлисте", en: "Search Playlist")
+            return strings.Music_SearchPlaylist
+        case .profile:
+            return strings.Music_SearchLibrary
         }
     }
 
@@ -1898,11 +2224,46 @@ final class MusicScreenNode: ASDisplayNode {
             ))
         }
 
+        var tabs: AnyComponent<Empty>?
+        if self.hasProfileTabs && self.playlistSearchQuery == nil {
+            // Tracks and Playlists as the chat list's folder tabs, under the bar.
+            let strings = self.presentationData.strings
+            tabs = AnyComponent(HorizontalTabsComponent(
+                context: self.context,
+                theme: self.presentationData.theme,
+                tabs: [
+                    (MusicProfileTab.tracks, strings.Music_Tracks),
+                    (MusicProfileTab.playlists, strings.Music_Playlists)
+                ].map { item -> HorizontalTabsComponent.Tab in
+                    let (tab, title) = item
+                    return HorizontalTabsComponent.Tab(
+                        id: AnyHashable(tab.rawValue),
+                        content: .title(HorizontalTabsComponent.Tab.Title(text: title, entities: [], enableAnimations: false)),
+                        badge: nil,
+                        action: { [weak self] in
+                            self?.selectProfileTab(tab)
+                        }
+                    )
+                },
+                selectedTab: AnyHashable(self.profileTab.rawValue),
+                isEditing: false
+            ))
+        }
+
         return AnyComponent(HeaderPanelContainerComponent(
             theme: self.presentationData.theme,
-            tabs: nil,
+            tabs: tabs,
             panels: panels
         ))
+    }
+
+    private func selectProfileTab(_ tab: MusicProfileTab) {
+        guard self.profileTab != tab else {
+            return
+        }
+        self.profileTab = tab
+        self.updateList(scrollToTop: true, animated: true)
+        self.controller?.requestLayout(transition: .animated(duration: 0.4, curve: .spring))
     }
 
     func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
@@ -1938,6 +2299,8 @@ final class MusicScreenNode: ASDisplayNode {
                 tabsNodeIsSearch: false,
                 accessoryPanelContainer: nil,
                 accessoryPanelContainerHeight: 0.0,
+                // The bar's fade defaults to the chat list's white; Music lists sit on the pinned grey.
+                edgeEffectColor: self.backgroundColor(theme: self.presentationData.theme),
                 activateSearch: { [weak self] _ in
                     self?.setPlaylistSearchActive(true)
                 },
@@ -1972,6 +2335,15 @@ final class MusicScreenNode: ASDisplayNode {
                 // The first block keeps 16 pt from the player or the search field (Figma Music / Default, Songs / Default):
                 // the bar ends 3 pt below the player, and the search field reaches 3 pt past the bar's end.
                 insets.top += self.controller?.globalControlPanelsContextState?.mediaPlayback != nil ? 13.0 : 3.0
+            }
+        }
+        if !isSearching && self.hasProfileTabs {
+            // The profile's tabs are the bar's lowest part (under them only the player, in the same glass, which ends
+            // 3 pt above the bar's end): the first block keeps 16 pt from that glass, its own top inset.
+            insets.top = navigationBarSize.height - 3.0
+            if self.profileTab == .playlists && !self.profilePlaylists.isEmpty {
+                // Playlist rows have no top inset of their own; Play/Shuffle and the empty text do.
+                insets.top += 16.0
             }
         }
         insets.left = layout.safeInsets.left
@@ -2029,6 +2401,9 @@ final class MusicScreenNode: ASDisplayNode {
         insets.right = layout.safeInsets.right
         if self.isSelecting && self.controller?.mode == .navigation {
             insets.bottom = self.selectionPanelBottomInset(layout: layout) + MusicScreenNode.selectionPanelHeight + 8.0
+        } else if self.displaysPlaylistPlaybackPanel {
+            // The last track clears the player by the same 8 pt as the selection toolbar.
+            insets.bottom = max(insets.bottom, self.selectionPanelBottomInset(layout: layout) + MusicScreenNode.playlistPlaybackPanelHeight + 8.0)
         }
         transition.updateFrame(node: self.listNode, frame: CGRect(origin: CGPoint(), size: layout.size))
         let (duration, curve) = listViewAnimationDurationAndCurve(transition: transition)
@@ -2037,6 +2412,7 @@ final class MusicScreenNode: ASDisplayNode {
             self.updateList()
         }
         self.updateSelectionPanel(layout: layout, transition: transition)
+        self.updatePlaylistPlaybackPanel(layout: layout, transition: transition)
         if applyScroll {
             self.applyNavigationScroll(transition: ComponentTransition(transition))
         }
@@ -2082,9 +2458,28 @@ final class MusicScreenNode: ASDisplayNode {
         }
 
         let isExpanded = self.isPlaylistHeaderExpanded
+        // A sheet over a chat is away from the Dynamic Island: there the round avatar is not clipped into it but
+        // scrolls on under the bar's blur and gradient, as content under any sheet's bar.
+        let isSheet = self.controller?.navigationPresentation == .modal
         let headerHeight = MusicPlaylistHeaderView.height(width: layout.size.width, statusBarHeight: layout.statusBarHeight ?? 0.0, isExpanded: isExpanded)
         headerView.frame = CGRect(origin: CGPoint(), size: CGSize(width: layout.size.width, height: layout.size.height))
-        headerView.update(theme: theme, title: playlist.title, subtitle: self.playlistOwnerName, cover: self.playlistCoverImage, isExpanded: isExpanded, size: layout.size, statusBarHeight: layout.statusBarHeight ?? 0.0, hasDynamicIsland: layout.deviceMetrics.hasDynamicIsland, offset: offset, transition: headerTransition)
+        // In the Music section the status is the track count alone; in the sheet from a chat it names the author first,
+        // as a forwarded message does.
+        let trackCountText = musicTrackCountString(self.presentationData.strings, self.library.tracks(of: playlist).count)
+        var headerAuthor: MusicPlaylistHeaderView.Author?
+        if isSheet, let peer = self.playlistOwnerPeer {
+            let nameColor: UIColor
+            switch peer.nameColor {
+            case let .preset(color):
+                nameColor = self.context.peerNameColors.get(color, dark: theme.overallDarkAppearance).main
+            case let .collectible(color):
+                nameColor = color.mainColor(dark: theme.overallDarkAppearance)
+            default:
+                nameColor = theme.list.itemAccentColor
+            }
+            headerAuthor = MusicPlaylistHeaderView.Author(context: self.context, peer: peer, name: self.playlistOwnerName, nameColor: nameColor, suffix: " • " + trackCountText)
+        }
+        headerView.update(theme: theme, title: playlist.title, subtitle: trackCountText, author: headerAuthor, cover: self.playlistCoverImage, isExpanded: isExpanded, size: layout.size, statusBarHeight: layout.statusBarHeight ?? 0.0, hasDynamicIsland: layout.deviceMetrics.hasDynamicIsland && !isSheet, offset: offset, transition: headerTransition)
 
         // The bar's fade comes in as soon as content passes under it, never over the expanded cover.
         let edgeAlpha: CGFloat
@@ -2114,7 +2509,8 @@ final class MusicScreenNode: ASDisplayNode {
             component: AnyComponent(GlassControlPanelComponent(
                 theme: theme,
                 leftItem: GlassControlPanelComponent.Item(
-                    items: [GlassControlGroupComponent.Item(id: AnyHashable("back"), content: .icon("Navigation/Back"), action: { [weak self] in
+                    // As a sheet over a chat the playlist closes rather than goes back.
+                    items: [GlassControlGroupComponent.Item(id: AnyHashable("back"), content: .icon(self.controller?.navigationPresentation == .modal ? "Navigation/Close" : "Navigation/Back"), action: { [weak self] in
                         self?.controller?.goBack()
                     })],
                     background: .panel
@@ -2373,7 +2769,7 @@ final class MusicScreenNode: ASDisplayNode {
                     strings: strings,
                     metrics: layout.metrics,
                     safeInsets: UIEdgeInsets(top: 0.0, left: layout.safeInsets.left + 5.0, bottom: 0.0, right: layout.safeInsets.right + 5.0),
-                    placeholder: self.isPlaylistScreen ? musicString(strings, ru: "Поиск треков", en: "Search Tracks") : (self.searchPlaceholder() ?? musicString(strings, ru: "Поиск", en: "Search")),
+                    placeholder: self.isPlaylistScreen ? strings.Music_SearchTracks : (self.searchPlaceholder() ?? strings.Music_Search),
                     hasEdgeEffect: false,
                     updated: { [weak self] query in
                         guard let self, self.playlistSearchQuery != nil, self.playlistSearchQuery != query else {
@@ -2423,12 +2819,24 @@ final class MusicScreenNode: ASDisplayNode {
         } else {
             self.hapticFeedback.tap()
         }
-        let _ = layout
-        // The rows move with the spacer's height in the list's own animation; the header morphs over the same time.
+        // As the profile's `containerLayoutUpdated(additive: true)`: the spacer changes at once, so the list's offset does
+        // not move and the header plays one spring by itself; the rows catch up with the same spring, additively.
+        let previousSpacerHeight = isExpanded ? 0.0 : MusicPlaylistHeaderView.height(width: layout.size.width, statusBarHeight: layout.statusBarHeight ?? 0.0, isExpanded: true) - MusicPlaylistHeaderView.height(width: layout.size.width, statusBarHeight: layout.statusBarHeight ?? 0.0, isExpanded: false)
+        let spacerDelta = self.playlistHeaderSpacerHeight - previousSpacerHeight
+        let transition: ContainedViewLayoutTransition = .animated(duration: 0.35, curve: .spring)
+        // The list keeps its rows where they were when the spacer changes, which would move its offset by the spacer's
+        // whole difference and flip the cover straight back: the offset is kept in the same transaction instead.
+        var keepingTopOffset: CGFloat = 0.0
+        if case let .known(value) = self.listNode.visibleContentOffset() {
+            keepingTopOffset = value
+        }
         self.isTogglingPlaylistHeader = true
-        self.updateList(allUpdated: true, animated: true)
+        self.updateList(allUpdated: true, keepingTopOffset: keepingTopOffset, animated: false)
         self.isTogglingPlaylistHeader = false
-        self.playlistHeaderTransition = .animated(duration: 0.35, curve: .spring)
+        if case let .animated(duration, curve) = transition, spacerDelta != 0.0 {
+            self.listNode.layer.animatePosition(from: CGPoint(x: 0.0, y: -spacerDelta), to: CGPoint(), duration: duration, timingFunction: curve.timingFunction, mediaTimingFunction: curve.mediaTimingFunction, additive: true)
+        }
+        self.playlistHeaderTransition = transition
         self.applyNavigationScroll(transition: .immediate)
     }
 

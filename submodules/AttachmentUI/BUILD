@@ -21,6 +21,8 @@ swift_library(
         "//submodules/TelegramStringFormatting:TelegramStringFormatting",
         "//submodules/AppBundle:AppBundle",
         "//submodules/ComponentFlow:ComponentFlow",
+        "//submodules/TelegramUI/Components/ButtonComponent",
+        "//submodules/TelegramUI/Components/AnimatedTextComponent",
         "//submodules/UIKitRuntimeUtils:UIKitRuntimeUtils",
         "//submodules/DirectionalPanGesture:DirectionalPanGesture",
         "//submodules/AttachmentTextInputPanelNode:AttachmentTextInputPanelNode",

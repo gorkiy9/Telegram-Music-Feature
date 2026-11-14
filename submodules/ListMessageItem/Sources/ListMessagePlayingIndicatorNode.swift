@@ -12,7 +12,7 @@ public enum ListMessageItemPlayingIndicator: Equatable {
 /// The playing track's cover overlay (Figma Playing Now 316:26503): a 40% black circle over the cover with a white
 /// sound wave in the middle, after SF Symbols' waveform.mid at 20 pt — five round bars that rise and fall while the
 /// track plays and rest in the glyph's shape while it is paused. Reduce Motion keeps them resting.
-final class ListMessagePlayingIndicatorNode: ASDisplayNode {
+public final class ListMessagePlayingIndicatorNode: ASDisplayNode {
     /// The glyph's bar heights at rest, for a 20 pt canvas; the bars are 2 pt wide with 2 pt between them.
     private static let restHeights: [CGFloat] = [6.0, 11.0, 16.0, 11.0, 6.0]
     /// How high each bar reaches while playing, and how long one rise takes: unequal, so the wave never repeats in step.
@@ -27,7 +27,7 @@ final class ListMessagePlayingIndicatorNode: ASDisplayNode {
     private var state: ListMessageItemPlayingIndicator?
     private var isInHierarchyNow = false
 
-    override init() {
+    override public init() {
         self.backgroundNode = ASDisplayNode()
         self.backgroundNode.isLayerBacked = true
         self.backgroundNode.backgroundColor = UIColor(white: 0.0, alpha: 0.4)
@@ -48,19 +48,19 @@ final class ListMessagePlayingIndicatorNode: ASDisplayNode {
         }
     }
 
-    override func didEnterHierarchy() {
+    override public func didEnterHierarchy() {
         super.didEnterHierarchy()
         self.isInHierarchyNow = true
         self.updateAnimations()
     }
 
-    override func didExitHierarchy() {
+    override public func didExitHierarchy() {
         super.didExitHierarchy()
         self.isInHierarchyNow = false
         self.updateAnimations()
     }
 
-    func update(size: CGSize, state: ListMessageItemPlayingIndicator) {
+    public func update(size: CGSize, state: ListMessageItemPlayingIndicator) {
         self.backgroundNode.frame = CGRect(origin: CGPoint(), size: size)
         self.backgroundNode.cornerRadius = size.width / 2.0
 

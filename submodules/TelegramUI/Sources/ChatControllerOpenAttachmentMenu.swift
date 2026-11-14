@@ -16,6 +16,7 @@ import ChatPresentationInterfaceState
 import LegacyComponents
 import LegacyUI
 import AttachmentUI
+import MusicScreen
 import MediaPickerUI
 import LegacyCamera
 import LegacyMediaPickerUI
@@ -651,6 +652,45 @@ extension ChatControllerImpl {
                         return true
                     case .audio:
                         strongSelf.controllerNavigationDisposable.set(nil)
+                        if isMusicSectionEnabled, bannedSendFiles.map({ _ in false }) ?? true {
+                            // The Music section's library: the picked tracks go as one group (an album of up to 10
+                            // files, as the client sends files), every picked playlist as a message of its own; the
+                            // caption goes under the first group.
+                            let controller = MusicAttachmentScreen(context: strongSelf.context, peerId: strongSelf.chatLocation.peerId ?? strongSelf.context.account.peerId, send: { [weak self] groups, silentPosting, caption in
+                                guard let self else {
+                                    return
+                                }
+                                var attributes: [EngineMessage.Attribute] = []
+                                var text = ""
+                                if let caption {
+                                    text = caption.string
+                                    let entities = generateTextEntities(text, enabledTypes: .all, currentEntities: generateChatInputTextEntities(caption))
+                                    if !entities.isEmpty {
+                                        attributes.append(TextEntitiesMessageAttribute(entities: entities))
+                                    }
+                                }
+                                var messages: [EnqueueMessage] = []
+                                for (groupIndex, mediaReferences) in groups.enumerated() {
+                                    var groupingKey: Int64?
+                                    if mediaReferences.count > 1 {
+                                        groupingKey = Int64.random(in: .min ..< .max)
+                                    }
+                                    for (index, mediaReference) in mediaReferences.enumerated() {
+                                        if index > 0 && index % 10 == 0 {
+                                            groupingKey = Int64.random(in: .min ..< .max)
+                                        }
+                                        let hasCaption = groupIndex == 0 && index == mediaReferences.count - 1
+                                        messages.append(.message(text: hasCaption ? text : "", attributes: hasCaption ? attributes : [], inlineStickers: [:], mediaReference: mediaReference, threadId: self.chatLocation.threadId, replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: groupingKey, correlationId: nil, bubbleUpEmojiOrStickersets: []))
+                                    }
+                                }
+                                messages = self.transformEnqueueMessages(messages, silentPosting: silentPosting, scheduleTime: nil, repeatPeriod: nil, postpone: false)
+                                self.presentPaidMessageAlertIfNeeded(completion: { [weak self] postpone in
+                                    self?.sendMessages(messages, media: true, postpone: postpone)
+                                })
+                            })
+                            completion(controller, controller.mediaPickerContext)
+                            return true
+                        }
                         let existingController = currentAudioController.with { $0 }
                         if let controller = existingController {
                             completion(controller, controller.mediaPickerContext)

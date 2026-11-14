@@ -85,7 +85,7 @@ extension PeerInfoScreenNode {
         case .recentCalls:
             push(CallListController(context: context, mode: .navigation))
         case .music:
-            push(MusicScreen(context: self.context, mode: .navigation))
+            push(musicSettingsController(context: self.context))
         case .devices:
             let _ = (self.activeSessionsContextAndCount.get()
             |> take(1)

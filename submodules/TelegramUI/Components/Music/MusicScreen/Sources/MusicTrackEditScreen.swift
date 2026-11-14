@@ -424,7 +424,7 @@ func musicTrackEditScreen(context: AccountContext, library: MusicLibrary, mode: 
         } else {
             isNew = false
         }
-        let title = isNew ? musicString(strings, ru: "Новый трек", en: "New Track") : musicString(strings, ru: "Редактировать трек", en: "Edit Track")
+        let title = isNew ? strings.Music_NewTrack : strings.Music_EditTrack
         let rightButton = ItemListNavigationButton(content: .icon(.done), style: .bold, enabled: !state.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, action: {
             arguments.done()
         })
@@ -440,8 +440,8 @@ func musicTrackEditScreen(context: AccountContext, library: MusicLibrary, mode: 
         }
         let rawEntries: [MusicTrackEditEntry] = [
             .cover(cover),
-            .title(text: state.title, placeholder: musicString(strings, ru: "Название трека", en: "Track Title")),
-            .artist(text: state.artist, placeholder: musicString(strings, ru: "Исполнитель", en: "Artist"))
+            .title(text: state.title, placeholder: strings.Music_TrackTitle),
+            .artist(text: state.artist, placeholder: strings.Music_Artist2)
         ]
         let entries = rawEntries.map { MusicTrackEditEntryBox(entry: $0, context: context) }
         let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: entries, style: .blocks, focusItemTag: MusicTrackEditEntryTag.title)

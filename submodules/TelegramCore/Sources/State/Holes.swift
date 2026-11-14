@@ -423,6 +423,16 @@ struct FetchMessageHistoryHoleResult: Equatable {
 func fetchMessageHistoryHole(accountPeerId: PeerId, source: FetchMessageHistoryHoleSource, postbox: Postbox, peerInput: FetchMessageHistoryHoleThreadInput, namespace: MessageId.Namespace, direction: MessageHistoryViewRelativeHoleDirection, space: MessageHistoryHoleOperationSpace, count rawCount: Int) -> Signal<FetchMessageHistoryHoleResult?, NoError> {
     let count = min(100, rawCount)
     
+    if case let .direct(peerId, _) = peerInput, isMusicTestChat(peerId) {
+        // The Music test chat is local: its history has nothing to fetch.
+        return postbox.transaction { transaction -> FetchMessageHistoryHoleResult? in
+            let range: ClosedRange<MessageId.Id> = 1 ... (Int32.max - 1)
+            transaction.removeHole(peerId: peerId, threadId: nil, namespace: namespace, space: space, range: range)
+            let indices = IndexSet(integersIn: Int(range.lowerBound) ... Int(range.upperBound))
+            return FetchMessageHistoryHoleResult(removedIndices: indices, strictRemovedIndices: indices, actualPeerId: peerId, actualThreadId: nil, ids: [])
+        }
+    }
+    
     return postbox.stateView()
     |> mapToSignal { view -> Signal<AuthorizedAccountState, NoError> in
         if let state = view.state as? AuthorizedAccountState {

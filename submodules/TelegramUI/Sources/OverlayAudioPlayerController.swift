@@ -9,6 +9,7 @@ import UndoUI
 import AttachmentFileController
 import LegacyMediaPickerUI
 import ICloudResources
+import MusicScreen
 
 final class OverlayAudioPlayerControllerImpl: ViewController, OverlayAudioPlayerController {
     private let context: AccountContext
@@ -140,7 +141,7 @@ final class OverlayAudioPlayerControllerImpl: ViewController, OverlayAudioPlayer
                                 }
                             })
                         }
-                    }))
+                    }, hidesSenderNames: isMusicSectionEnabled && strongSelf.type == .music))
                     strongSelf.controllerNode.view.endEditing(true)
                     strongSelf.present(shareController, in: .window(.root))
                 }

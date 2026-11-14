@@ -10,6 +10,7 @@ private enum TelegramMediaWebpageAttributeTypes: Int32 {
     case giftCollection
     case giftAuction
     case aiTextStyle
+    case musicPlaylist
 }
 
 public enum TelegramMediaWebpageAttribute: PostboxCoding, Equatable {
@@ -20,6 +21,8 @@ public enum TelegramMediaWebpageAttribute: PostboxCoding, Equatable {
     case giftCollection(TelegramMediaWebpageGiftCollectionAttribute)
     case giftAuction(TelegramMediaWebpageGiftAuctionAttribute)
     case aiTextStyle(TelegramMediaWebpageAITextStyleAttribute)
+    /// Music section concept: a playlist shared into a chat (local only, the API has no playlists).
+    case musicPlaylist(TelegramMediaWebpageMusicPlaylistAttribute)
     
     public init(decoder: PostboxDecoder) {
         switch decoder.decodeInt32ForKey("r", orElse: 0) {
@@ -35,6 +38,8 @@ public enum TelegramMediaWebpageAttribute: PostboxCoding, Equatable {
             self = .giftAuction(decoder.decodeObjectForKey("a", decoder: { TelegramMediaWebpageGiftAuctionAttribute(decoder: $0) }) as! TelegramMediaWebpageGiftAuctionAttribute)
         case TelegramMediaWebpageAttributeTypes.aiTextStyle.rawValue:
             self = .aiTextStyle(decoder.decodeObjectForKey("a", decoder: { TelegramMediaWebpageAITextStyleAttribute(decoder: $0) }) as! TelegramMediaWebpageAITextStyleAttribute)
+        case TelegramMediaWebpageAttributeTypes.musicPlaylist.rawValue:
+            self = .musicPlaylist(decoder.decodeObjectForKey("a", decoder: { TelegramMediaWebpageMusicPlaylistAttribute(decoder: $0) }) as! TelegramMediaWebpageMusicPlaylistAttribute)
         default:
             self = .unsupported
         }
@@ -62,6 +67,9 @@ public enum TelegramMediaWebpageAttribute: PostboxCoding, Equatable {
         case let .aiTextStyle(attribute):
             encoder.encodeInt32(TelegramMediaWebpageAttributeTypes.aiTextStyle.rawValue, forKey: "r")
             encoder.encodeObject(attribute, forKey: "a")
+        case let .musicPlaylist(attribute):
+            encoder.encodeInt32(TelegramMediaWebpageAttributeTypes.musicPlaylist.rawValue, forKey: "r")
+            encoder.encodeObject(attribute, forKey: "a")
         }
     }
     
@@ -71,6 +79,39 @@ public enum TelegramMediaWebpageAttribute: PostboxCoding, Equatable {
         } else {
             return []
         }
+    }
+}
+
+/// Music section concept: the playlist's id on the sender's device and all its tracks, in playlist order.
+public final class TelegramMediaWebpageMusicPlaylistAttribute: PostboxCoding, Equatable {
+    public static func == (lhs: TelegramMediaWebpageMusicPlaylistAttribute, rhs: TelegramMediaWebpageMusicPlaylistAttribute) -> Bool {
+        if lhs.playlistId != rhs.playlistId || lhs.files.count != rhs.files.count {
+            return false
+        }
+        for i in 0 ..< lhs.files.count {
+            if !lhs.files[i].isEqual(to: rhs.files[i]) {
+                return false
+            }
+        }
+        return true
+    }
+    
+    public let playlistId: Int64
+    public let files: [TelegramMediaFile]
+    
+    public init(playlistId: Int64, files: [TelegramMediaFile]) {
+        self.playlistId = playlistId
+        self.files = files
+    }
+    
+    public init(decoder: PostboxDecoder) {
+        self.playlistId = decoder.decodeInt64ForKey("id", orElse: 0)
+        self.files = decoder.decodeObjectArrayForKey("files")
+    }
+    
+    public func encode(_ encoder: PostboxEncoder) {
+        encoder.encodeInt64(self.playlistId, forKey: "id")
+        encoder.encodeObjectArray(self.files, forKey: "files")
     }
 }
 

@@ -184,6 +184,10 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
     private let shareButton: GlassButtonView
     private let tagButton: GlassButtonView
     private let tagEditButton: GlassButtonView
+    /// Music section concept: puts the selected tracks into Music; shown while the selection has music.
+    private let musicButton: GlassButtonView
+    private var selectedMusicMessages: [EngineRawMessage] = []
+    private let selectedMusicDisposable = MetaDisposable()
     
     private let reactionOverlayContainer: ChatMessageSelectionInputPanelNodeViewForOverlayContent
     
@@ -240,6 +244,12 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
         self.tagEditButton.isAccessibilityElement = true
         self.tagEditButton.accessibilityLabel = strings.VoiceOver_MessageSelectionButtonTag
         
+        self.musicButton = GlassButtonView()
+        self.musicButton.icon = "Chat/Context Menu/AddMusic"
+        self.musicButton.isHidden = true
+        self.musicButton.isAccessibilityElement = true
+        self.musicButton.accessibilityLabel = strings.Music_AddToMusic
+        
         self.reactionOverlayContainer = ChatMessageSelectionInputPanelNodeViewForOverlayContent()
         
         super.init()
@@ -250,6 +260,7 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
         self.view.addSubview(self.shareButton)
         self.view.addSubview(self.tagButton)
         self.view.addSubview(self.tagEditButton)
+        self.view.addSubview(self.musicButton)
         
         self.viewForOverlayContent = self.reactionOverlayContainer
         
@@ -262,14 +273,66 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
         self.shareButton.button.addTarget(self, action: #selector(self.shareButtonPressed), for: .touchUpInside)
         self.tagButton.button.addTarget(self, action: #selector(self.tagButtonPressed), for: .touchUpInside)
         self.tagEditButton.button.addTarget(self, action: #selector(self.tagButtonPressed), for: .touchUpInside)
+        self.musicButton.button.addTarget(self, action: #selector(self.musicButtonPressed), for: .touchUpInside)
     }
     
     deinit {
         self.canDeleteMessagesDisposable.dispose()
+        self.selectedMusicDisposable.dispose()
+    }
+    
+    private func updateSelectedMusic() {
+        guard isMusicSectionEnabled, let context = self.context, !self.selectedMessages.isEmpty else {
+            self.selectedMusicDisposable.set(nil)
+            self.setSelectedMusicMessages([])
+            return
+        }
+        let ids = Array(self.selectedMessages)
+        self.selectedMusicDisposable.set(combineLatest(queue: .mainQueue(), context.engine.data.get(EngineDataMap(ids.map { TelegramEngine.EngineData.Item.Messages.Message(id: $0) })), context.sharedContext.musicLibraryFileIds(context: context)).startStrict(next: { [weak self] messages, libraryFileIds in
+            guard let self else {
+                return
+            }
+            let musicMessages = ids.sorted().compactMap { id -> EngineRawMessage? in
+                guard let message = messages[id].flatMap({ $0 })?._asMessage(), message.media.contains(where: { ($0 as? TelegramMediaFile)?.isMusic == true }) else {
+                    return nil
+                }
+                return message
+            }
+            // Enabled while at least one selected track is not in Music yet; only those are added.
+            let hasMissing = musicMessages.contains { message in
+                return message.media.contains(where: { media in
+                    guard let file = media as? TelegramMediaFile, file.isMusic else {
+                        return false
+                    }
+                    return !libraryFileIds.contains(file.fileId.id)
+                })
+            }
+            self.setSelectedMusicMessages(musicMessages, isEnabled: hasMissing)
+        }))
+    }
+    
+    private func setSelectedMusicMessages(_ messages: [EngineRawMessage], isEnabled: Bool = true) {
+        let wasHidden = self.musicButton.isHidden
+        self.selectedMusicMessages = messages
+        self.musicButton.isHidden = messages.isEmpty
+        self.musicButton.isEnabled = isEnabled
+        if wasHidden != self.musicButton.isHidden {
+            self.update(transition: .animated(duration: 0.2, curve: .easeInOut))
+        }
+    }
+    
+    @objc private func musicButtonPressed() {
+        guard let context = self.context, !self.selectedMusicMessages.isEmpty, self.musicButton.isEnabled else {
+            return
+        }
+        let messages = self.selectedMusicMessages
+        self.interfaceInteraction?.cancelMessageSelection(.animated(duration: 0.4, curve: .spring))
+        context.sharedContext.addMusicTracksToLibrary(context: context, messages: messages)
     }
     
     private func updateActions() {
         self.forwardButton.isEnabled = self.selectedMessages.count != 0
+        self.updateSelectedMusic()
         
         if self.selectedMessages.isEmpty {
             self.actions = nil
@@ -526,7 +589,7 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
             tagButton = self.tagEditButton
         }
         
-        let buttons: [GlassButtonView]
+        var buttons: [GlassButtonView]
         if self.reportButton.isHidden {
             if let tagButton {
                 buttons = [
@@ -576,6 +639,10 @@ public final class ChatMessageSelectionInputPanelNode: ChatInputPanelNode {
                     self.forwardButton
                 ]
             }
+        }
+        
+        if !self.musicButton.isHidden, let shareIndex = buttons.firstIndex(where: { $0 === self.shareButton }) {
+            buttons.insert(self.musicButton, at: shareIndex)
         }
         
         let buttonSize = CGSize(width: 40.0, height: 40.0)

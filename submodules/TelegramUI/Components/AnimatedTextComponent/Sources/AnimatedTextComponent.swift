@@ -54,6 +54,11 @@ public final class AnimatedTextComponent: Component {
     /// Its text drawn by `SplitTintTextView`s: in white, coloured by their text layers' multiply colour
     /// (`textTintLayers`), emoji apart and untinted, so a transition can run the colour on the render server.
     public let splitsEmoji: Bool
+    /// Characters that change slide down instead of up: the new one comes from above, the old one leaves below (a
+    /// counter going down).
+    public let slidesDown: Bool
+    /// How far a changing character slides, in its height; nil keeps the default.
+    public let slideFactor: CGFloat?
     
     public init(
         font: UIFont,
@@ -65,7 +70,9 @@ public final class AnimatedTextComponent: Component {
         preferredDirectionIsDown: Bool = false,
         blur: Bool = false,
         useTransitionAnimation: Bool = false,
-        splitsEmoji: Bool = false
+        splitsEmoji: Bool = false,
+        slidesDown: Bool = false,
+        slideFactor: CGFloat? = nil
     ) {
         self.font = font
         self.color = color
@@ -77,6 +84,8 @@ public final class AnimatedTextComponent: Component {
         self.blur = blur
         self.useTransitionAnimation = useTransitionAnimation
         self.splitsEmoji = splitsEmoji
+        self.slidesDown = slidesDown
+        self.slideFactor = slideFactor
     }
 
     public static func ==(lhs: AnimatedTextComponent, rhs: AnimatedTextComponent) -> Bool {
@@ -108,6 +117,12 @@ public final class AnimatedTextComponent: Component {
             return false
         }
         if lhs.splitsEmoji != rhs.splitsEmoji {
+            return false
+        }
+        if lhs.slidesDown != rhs.slidesDown {
+            return false
+        }
+        if lhs.slideFactor != rhs.slideFactor {
             return false
         }
         return true
@@ -167,6 +182,10 @@ public final class AnimatedTextComponent: Component {
                 firstDelayWidth = 0.0
                 offsetNorm = 0.8
             }
+            if let slideFactor = component.slideFactor {
+                offsetNorm = slideFactor
+            }
+            let slideSign: CGFloat = component.slidesDown ? -1.0 : 1.0
             
             var validKeys: [CharacterKey] = []
             for item in component.items {
@@ -367,7 +386,7 @@ public final class AnimatedTextComponent: Component {
                                 ComponentTransition.easeInOut(duration: 0.2).animateBlur(layer: characterComponentView.layer, from: transitionBlurRadius, to: 0.0, delay: delayNorm * delayWidth)
                             }
                             if component.animateSlide {
-                                motionTransition.animatePosition(layer: characterComponentView.layer, from: CGPoint(x: 0.0, y: characterSize.height * offsetNorm), to: CGPoint(), delay: delayNorm * delayWidth, additive: true)
+                                motionTransition.animatePosition(layer: characterComponentView.layer, from: CGPoint(x: 0.0, y: characterSize.height * offsetNorm * slideSign), to: CGPoint(), delay: delayNorm * delayWidth, additive: true)
                             }
                             alphaTransition.animateAlpha(layer: characterComponentView.layer, from: 0.0, to: 1.0, delay: delayNorm * delayWidth)
                         }
@@ -403,12 +422,7 @@ public final class AnimatedTextComponent: Component {
                                 characterComponentView.layer.shouldRasterize = true
                                 motionTransition.setScale(view: characterComponentView, scale: 0.01, delay: delayNorm * delayWidth)
                             }
-                            let targetY: CGFloat
-                            if component.preferredDirectionIsDown {
-                                targetY = characterComponentView.center.y - characterComponentView.bounds.height * offsetNorm
-                            } else {
-                                targetY = characterComponentView.center.y - characterComponentView.bounds.height * offsetNorm
-                            }
+                            let targetY = characterComponentView.center.y - characterComponentView.bounds.height * offsetNorm * slideSign
                             if component.animateSlide {
                                 motionTransition.setPosition(view: characterComponentView, position: CGPoint(x: characterComponentView.center.x, y: targetY), delay: delayNorm * delayWidth)
                             }

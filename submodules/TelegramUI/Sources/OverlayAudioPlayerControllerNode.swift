@@ -88,6 +88,10 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private var isCompact = false
     private var favoriteFileIds = Set<Int64>()
     private var libraryState: MusicPlayerLibraryState?
+    /// Changes made in the sheet that the library has not applied yet: it follows once the toast's icon animation
+    /// has played (`MusicPlayerSupport`), and the buttons show the new state meanwhile.
+    private var pendingInMusic: [Int64: Bool] = [:]
+    private var pendingFavorites: [Int64: Bool] = [:]
     private var libraryQueue: MusicPlayerQueueInfo?
     private var sourceCount: Int?
     private var sourceChatPeer: EnginePeer?
@@ -113,8 +117,8 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private var queueMessages: [EngineRawMessage] = []
     /// The queue is the Music section's own: it can be reordered and its tracks play without replacing it.
     private var queueIsLibrary = false
-    /// «Транслировать в профиль» has no API behind it: the choice is kept for the player's lifetime only.
-    private var isBroadcastingToProfile = false
+    /// Shuffle was turned on for a queue that is not the section's yet: it is taken over once its tracks load.
+    private var queueShufflePending = false
     private var queueSheetOpeningFrame: CGRect?
     /// The sheet is folding back into the compact one's header; the card keeps its place meanwhile.
     private var isQueueClosing = false
@@ -952,7 +956,11 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         self.controlsNode.requestOpenQueue = { [weak self] in
             self?.openQueue()
         }
+        self.controlsNode.requestShuffle = { [weak self] in
+            self?.queueShufflePressed()
+        }
         self.controlsNode.currentItemChanged = { [weak self] in
+            self?.updateQueueShuffleButton()
             guard let self, self.isQueueOpen || self.isQueueInteractivelyOpening else {
                 return
             }
@@ -978,6 +986,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             } else {
                 self.favoriteFileIds.remove(fileId)
             }
+            self.pendingFavorites[fileId] = isFavorite
             MusicPlayerSupport.setFavorite(context: self.context, fileId: fileId, isFavorite: isFavorite)
             if let layout = self.validLayout {
                 self.containerLayoutUpdated(layout, transition: .immediate)
@@ -1025,9 +1034,27 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             }
             self.libraryQueue = libraryQueue
             self.libraryState = libraryState
-            self.favoriteFileIds = libraryState.favoriteFileIds
+            var favoriteFileIds = libraryState.favoriteFileIds
+            for (fileId, isFavorite) in self.pendingFavorites {
+                if favoriteFileIds.contains(fileId) == isFavorite {
+                    self.pendingFavorites[fileId] = nil
+                } else if isFavorite {
+                    favoriteFileIds.insert(fileId)
+                } else {
+                    favoriteFileIds.remove(fileId)
+                }
+            }
+            self.favoriteFileIds = favoriteFileIds
+            for (fileId, isInMusic) in self.pendingInMusic {
+                let isApplied = isInMusic ? (libraryState.trackFileIds.contains(fileId) && !libraryState.removedFileIds.contains(fileId)) : libraryState.removedFileIds.contains(fileId)
+                if isApplied {
+                    self.pendingInMusic[fileId] = nil
+                }
+            }
             self.sourceCount = sourceCount
             self.sourceChatPeer = sourceChatPeer
+            self.applyPendingQueueShuffle()
+            self.updateQueueShuffleButton()
             if self.isQueueOpen {
                 let isLibrary = libraryQueue.flatMap { queue in self.currentQueueMessageId.flatMap { queue.messageIds.contains($0) } } ?? false
                 if isLibrary && !self.queueIsLibrary {
@@ -1049,6 +1076,9 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private var isInMusic: Bool? {
         guard let fileId = self.controlsNode.currentFileReference?.media.fileId.id else {
             return nil
+        }
+        if let pending = self.pendingInMusic[fileId] {
+            return pending
         }
         let state = self.libraryState
         if state?.removedFileIds.contains(fileId) == true {
@@ -1074,6 +1104,10 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private func toggleInMusic() {
         guard let file = self.controlsNode.currentFileReference, let isInMusic = self.isInMusic else {
             return
+        }
+        self.pendingInMusic[file.media.fileId.id] = !isInMusic
+        if let layout = self.validLayout {
+            self.containerLayoutUpdated(layout, transition: .immediate)
         }
         if isInMusic {
             MusicPlayerSupport.removeFromMusic(context: self.context, fileId: file.media.fileId.id)
@@ -1525,12 +1559,103 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     /// The sheet turns the queue over itself; the full player's reversed order would hide «На очереди» from the first
     /// track and play the queue backwards behind Reverse's back. A rich message's queue keeps it: Reverse uses it there.
     private func resetLegacyReversedOrder(_ order: MusicPlaybackSettingsOrder) {
+        if order == .random, !self.queueIsInstantPage {
+            // The order setting's shuffle hides the play order and stops dragging: the queue is mixed itself instead.
+            if !self.queueShufflePending {
+                self.queueShufflePending = true
+                self.updateQueueShuffleButton()
+                self.applyPendingQueueShuffle()
+                if self.queueShufflePending && self.queueMessages.isEmpty {
+                    self.reloadQueueMessages()
+                }
+            }
+            return
+        }
         guard order == .reversed, !self.queueIsInstantPage else {
             return
         }
         let _ = updateMusicPlaybackSettingsInteractively(accountManager: self.context.sharedContext.accountManager, {
             return $0.withUpdatedOrder(.regular)
         }).startStandalone()
+        self.context.sharedContext.mediaManager.playlistControl(.setOrder(.regular), type: self.type)
+    }
+    
+    /// The playing track is in the section's queue and that queue is mixed.
+    private var isLibraryQueueShuffled: Bool {
+        guard let libraryQueue = self.libraryQueue, libraryQueue.isShuffled, let currentId = self.currentQueueMessageId else {
+            return false
+        }
+        return libraryQueue.messageIds.contains(currentId)
+    }
+    
+    private func updateQueueShuffleButton() {
+        self.controlsNode.isQueueShuffled = self.queueIsInstantPage ? nil : (self.queueShufflePending || self.isLibraryQueueShuffled)
+    }
+    
+    /// Shuffle mixes the queue itself (the playing track first), so the queue list keeps showing the play order and
+    /// every track can still be dragged. A rich message's tracks keep the order setting: their queue is not the section's.
+    private func queueShufflePressed() {
+        if self.queueIsInstantPage {
+            let order = self.controlsNode.currentOrder ?? .regular
+            let nextOrder: MusicPlaybackSettingsOrder = order == .random ? .regular : .random
+            let _ = updateMusicPlaybackSettingsInteractively(accountManager: self.context.sharedContext.accountManager, {
+                return $0.withUpdatedOrder(nextOrder)
+            }).startStandalone()
+            self.context.sharedContext.mediaManager.playlistControl(.setOrder(nextOrder), type: self.type)
+            return
+        }
+        let isActive = self.queueShufflePending || self.isLibraryQueueShuffled || self.controlsNode.currentOrder == .random
+        if isActive {
+            self.queueShufflePending = false
+            self.resetRandomOrder(completion: nil)
+            if self.isLibraryQueueShuffled {
+                MusicPlayerSupport.setQueueShuffled(context: self.context, false)
+            }
+        } else {
+            self.queueShufflePending = true
+            self.applyPendingQueueShuffle()
+            if self.queueShufflePending && !self.queueMessages.contains(where: { $0.id == self.currentQueueMessageId }) {
+                self.reloadQueueMessages()
+            }
+        }
+        self.updateQueueShuffleButton()
+    }
+    
+    /// Mixes the queue once it can be: the section's own at once, another one when its tracks have loaded and it has
+    /// become the section's.
+    private func applyPendingQueueShuffle() {
+        guard self.queueShufflePending, !self.queueIsInstantPage, let currentId = self.currentQueueMessageId else {
+            return
+        }
+        if let libraryQueue = self.libraryQueue, libraryQueue.messageIds.contains(currentId) {
+            self.queueShufflePending = false
+            self.resetRandomOrder(completion: nil)
+            MusicPlayerSupport.setQueueShuffled(context: self.context, true)
+            self.updateQueueShuffleButton()
+        } else if self.queueMessages.contains(where: { $0.id == currentId }) {
+            self.queueShufflePending = false
+            // The adopted queue starts a new playlist, which reads the order setting: it must be regular by then.
+            self.resetRandomOrder(completion: { [weak self] in
+                guard let self, self.adoptQueue() else {
+                    return
+                }
+                MusicPlayerSupport.setQueueShuffled(context: self.context, true)
+                self.updateQueueShuffleButton()
+            })
+        }
+    }
+    
+    private func resetRandomOrder(completion: (() -> Void)?) {
+        guard self.controlsNode.currentOrder == .random else {
+            completion?()
+            return
+        }
+        let _ = (updateMusicPlaybackSettingsInteractively(accountManager: self.context.sharedContext.accountManager, {
+            return $0.withUpdatedOrder(.regular)
+        })
+        |> deliverOnMainQueue).startStandalone(completed: {
+            completion?()
+        })
         self.context.sharedContext.mediaManager.playlistControl(.setOrder(.regular), type: self.type)
     }
     
@@ -1582,12 +1707,13 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             }
             let isFirst = self.queueMessages.isEmpty
             self.queueMessages = messages
+            self.applyPendingQueueShuffle()
             self.updateQueueList(order: self.controlsNode.currentOrder ?? .regular, animated: !isFirst)
         }))
     }
     
-    /// The queue in play order: what played before the current track, the track, then what comes. Shuffle has no
-    /// order to show, so the list keeps the queue's own.
+    /// The queue in play order: what played before the current track, the track, then what comes. Shuffle mixes
+    /// the queue itself, so the list shows it as it plays.
     private func playOrderQueueMessages(order: MusicPlaybackSettingsOrder) -> [EngineRawMessage] {
         return order == .reversed ? self.queueMessages.reversed() : self.queueMessages
     }
@@ -1597,7 +1723,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             return
         }
         // Any queue but a rich message's can be reordered (a chat's or a profile's becomes the section's own on the
-        // first drag); a shuffled one has no order to change.
+        // first drag). Shuffle mixes the queue itself, so a shuffled queue is reordered like any other.
         let canReorder = !self.queueIsInstantPage && order == .regular && self.currentQueueMessageId != nil
         listNode.update(messages: self.playOrderQueueMessages(order: order), favoriteFileIds: self.favoriteFileIds, currentId: self.currentQueueMessageId, isPaused: self.controlsNode.currentIsPaused ?? false, canReorder: canReorder, animated: animated)
     }
@@ -1674,7 +1800,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         return .tracks
     }
     
-    /// Figma Player / Queue List Menu: Broadcast and Share, then the list actions, then the way back to the queue's
+    /// Figma Player / Queue List Menu: Share, then the list actions, then the way back to the queue's
     /// source. A playlist of the library is already one, so it offers no new playlist.
     private func openQueueMenu() {
         guard let controller = self.getParentController() else {
@@ -1692,15 +1818,6 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         let messages = self.queueMessages
         
         var items: [ContextMenuItem] = []
-        let isBroadcasting = self.isBroadcastingToProfile
-        items.append(.action(ContextMenuActionItem(text: isBroadcasting ? musicString(strings, ru: "Остановить трансляцию", en: "Stop Broadcasting") : musicString(strings, ru: "Транслировать в профиль", en: "Broadcast to Profile"), icon: icon("Chat/Context Menu/VoiceChat"), action: { [weak self] _, f in
-            f(.default)
-            guard let self else {
-                return
-            }
-            self.isBroadcastingToProfile = !isBroadcasting
-            MusicPlayerSupport.toast(context: context, text: isBroadcasting ? musicString(strings, ru: "Трансляция в профиль остановлена", en: "Broadcasting stopped") : musicString(strings, ru: "Музыка транслируется в профиль", en: "Your music is shown in your profile"), iconName: "Chat/Context Menu/VoiceChat")
-        })))
         if !self.copyProtectionEnabled && !messages.isEmpty {
             items.append(.action(ContextMenuActionItem(text: strings.Conversation_ContextMenuShare, icon: icon("Chat/Context Menu/Share"), action: { [weak self] _, f in
                 f(.default)
@@ -1714,13 +1831,13 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             offersNewPlaylist = false
         }
         if offersNewPlaylist && !messages.isEmpty {
-            listItems.append(.action(ContextMenuActionItem(text: musicString(strings, ru: "Создать плейлист", en: "New Playlist"), icon: icon("Music/NoteList"), action: { [weak self] _, f in
+            listItems.append(.action(ContextMenuActionItem(text: strings.Music_NewPlaylist, icon: icon("Music/NoteList"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 MusicPlayerSupport.createPlaylist(context: context, messages: messages, dismissPlayer: {
                     self?.requestDismiss()
                 })
             })))
-            listItems.append(.action(ContextMenuActionItem(text: musicString(strings, ru: "Добавить в плейлист", en: "Add to Playlist"), icon: icon("Chat/Context Menu/AddCaption"), action: { [weak self] _, f in
+            listItems.append(.action(ContextMenuActionItem(text: strings.Music_AddToPlaylist2, icon: icon("Chat/Context Menu/AddCaption"), action: { [weak self] _, f in
                 f(.default)
                 MusicPlayerSupport.addToPlaylist(context: context, messages: messages, present: { [weak self] controller in
                     (self?.getParentController() as? OverlayAudioPlayerControllerImpl)?.present(controller, in: .window(.root))
@@ -1730,13 +1847,15 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             })))
         }
         if !listItems.isEmpty {
-            items.append(.separator)
+            if !items.isEmpty {
+                items.append(.separator)
+            }
             items.append(contentsOf: listItems)
         }
         
         let peerName: (EnginePeer) -> String = { peer in
             if peer.id == context.account.peerId {
-                return musicString(strings, ru: "Ваш профиль", en: "Your Profile")
+                return strings.Music_YourProfile
             }
             if let addressName = peer.addressName, !addressName.isEmpty {
                 return "@\(addressName)"
@@ -1748,25 +1867,25 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         case .tracks:
             break
         case let .ownPlaylist(id):
-            goToItem = .action(ContextMenuActionItem(text: musicString(strings, ru: "Перейти к плейлисту", en: "Go to Playlist"), textLayout: .secondLineWithValue(MusicPlayerSupport.libraryTitle(strings: strings)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
+            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToPlaylist, textLayout: .secondLineWithValue(MusicPlayerSupport.libraryTitle(strings: strings)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 self?.requestDismiss()
                 MusicPlayerSupport.openPlaylist(context: context, id: id)
             }))
         case let .artist(name):
-            goToItem = .action(ContextMenuActionItem(text: musicString(strings, ru: "Перейти к артисту", en: "Go to Artist"), textLayout: .secondLineWithValue(name), icon: icon("Music/Microphone"), action: { [weak self] _, f in
+            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToArtist, textLayout: .secondLineWithValue(name), icon: icon("Music/Microphone"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 self?.requestDismiss()
                 MusicPlayerSupport.openArtist(context: context, name: name)
             }))
         case let .chat(peer):
-            goToItem = .action(ContextMenuActionItem(text: musicString(strings, ru: "Перейти к диалогу", en: "Go to Chat"), textLayout: .secondLineWithValue(peerName(peer)), icon: icon("Chat/Context Menu/GoToMessage"), action: { [weak self] _, f in
+            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToChat, textLayout: .secondLineWithValue(peerName(peer)), icon: icon("Chat/Context Menu/GoToMessage"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 self?.requestDismiss()
                 context.sharedContext.navigateToChat(accountId: context.account.id, peerId: peer.id, messageId: nil)
             }))
         case let .profile(peer):
-            goToItem = .action(ContextMenuActionItem(text: musicString(strings, ru: "Перейти к плейлисту", en: "Go to Playlist"), textLayout: .secondLineWithValue(peerName(peer)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
+            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToPlaylist, textLayout: .secondLineWithValue(peerName(peer)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 self?.requestDismiss()
                 guard let infoController = context.sharedContext.makePeerInfoController(context: context, updatedPresentationData: nil, peer: peer, mode: .generic, avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil), let navigationController = context.sharedContext.mainWindow?.viewController as? NavigationController else {
@@ -1776,23 +1895,28 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             }))
         }
         if let goToItem {
-            items.append(.separator)
+            if !items.isEmpty {
+                items.append(.separator)
+            }
             items.append(goToItem)
+        }
+        if items.isEmpty {
+            return
         }
         
         let contextController = makeContextController(presentationData: presentationData, source: .reference(OverlayAudioPlayerReferenceContentSource(sourceNode: self.queueMoreReferenceNode)), items: .single(ContextController.Items(content: .list(items))), gesture: nil)
         controller.presentInGlobalOverlay(contextController)
     }
     
-    /// Chat tracks are forwarded as their messages; a list of profile tracks, which have none, sends its first file.
+    /// The whole queue goes out as one group, the same way as tracks selected in Music.
     private func shareQueue() {
-        let messages = self.queueMessages
-        let chatMessages = messages.filter { $0.id.namespace == Namespaces.Message.Cloud }
-        if !chatMessages.isEmpty {
-            self.requestShare(.messages(Array(chatMessages.prefix(100))))
-        } else if let file = messages.first?.media.first(where: { $0 is TelegramMediaFile }) as? TelegramMediaFile {
-            self.requestShare(.media(.standalone(media: file), nil))
+        let messages = self.queueMessages.filter { message in
+            return message.media.contains(where: { $0 is TelegramMediaFile })
         }
+        guard !messages.isEmpty else {
+            return
+        }
+        self.requestShare(MusicPlayerSupport.queueShareSubject(context: self.context, messages: messages))
     }
     
     private func openCompactMoreMenu(referenceNode: ContextReferenceContentNode) {
@@ -1843,7 +1967,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         }
         // Adding to the profile moved here from the sheet: its button now adds to Music.
         if let isSaved = self.isSaved {
-            items.insert(.action(ContextMenuActionItem(text: isSaved ? musicString(strings, ru: "Убрать из профиля", en: "Remove from Profile") : musicString(strings, ru: "Добавить в профиль", en: "Add to Profile"), icon: icon(isSaved ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic"), action: { [weak self] _, f in
+            items.insert(.action(ContextMenuActionItem(text: isSaved ? strings.Music_RemoveFromProfile : strings.Music_AddToProfile, icon: icon(isSaved ? "Music/RemoveFromProfile" : "Peer Info/SaveMusic"), action: { [weak self] _, f in
                 f(.default)
                 guard let self else {
                     return
@@ -1865,7 +1989,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             if !items.isEmpty {
                 items.append(.separator)
             }
-            items.append(.action(ContextMenuActionItem(text: musicString(strings, ru: "Искать по артисту", en: "Search Artist"), textLayout: .secondLineWithValue(artist), icon: icon("Chat/Context Menu/Search"), action: { [weak self] _, f in
+            items.append(.action(ContextMenuActionItem(text: strings.Music_SearchArtist, textLayout: .secondLineWithValue(artist), icon: icon("Chat/Context Menu/Search"), action: { [weak self] _, f in
                 f(.default)
                 self?.requestSearchByArtist(artist)
             })))

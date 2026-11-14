@@ -132,6 +132,37 @@ public final class MusicPlayerQueueListNode: ASDisplayNode {
             }
             entries.append(MusicPlayerQueueEntry(index: entries.count, message: message, isFavorite: isFavorite, canReorder: self.canReorder, playingIndicator: indicator))
         }
+        // Shuffle and Reverse change the place of every row. The stable merge is quadratic on such a change and the list
+        // would then animate a move for every track, which froze the sheet on a long queue: the list is rebuilt at once
+        // instead and crossfades into the new order. A drag or Play Next moves one block and keeps its animation.
+        if !allUpdated, MusicPlayerQueueListNode.isReordered(from: self.entries, to: entries) {
+            let previousCount = self.entries.count
+            let previousOrder = self.entries.map(\.stableId)
+            self.entries = entries
+            if animated, let snapshot = self.listNode.view.snapshotView(afterScreenUpdates: false) {
+                snapshot.frame = self.listNode.frame
+                self.view.insertSubview(snapshot, aboveSubview: self.listNode.view)
+                snapshot.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.2, removeOnCompletion: false, completion: { [weak snapshot] _ in
+                    snapshot?.removeFromSuperview()
+                })
+            }
+            // Reverse turns the queue over: the playing track lands at the bottom of the visible list, with the tracks
+            // now before it above, so nothing has to be scrolled to see it. Shuffle puts it first, at the top.
+            let isReversal = previousOrder.elementsEqual(entries.reversed().map(\.stableId))
+            var scrollToItem: ListViewScrollToItem?
+            if let currentIndex, self.validLayout != nil {
+                scrollToItem = ListViewScrollToItem(index: currentIndex, position: isReversal ? .bottom(0.0) : .top(0.0), animated: false, curve: .Default(duration: nil), directionHint: isReversal ? .Up : .Down)
+            }
+            self.listNode.transaction(
+                deleteIndices: (0 ..< previousCount).reversed().map { ListViewDeleteItem(index: $0, directionHint: nil) },
+                insertIndicesAndItems: entries.enumerated().map { ListViewInsertItem(index: $0.offset, previousIndex: nil, item: self.item(entry: $0.element), directionHint: nil) },
+                updateIndicesAndItems: [],
+                options: [.Synchronous, .LowLatency],
+                scrollToItem: scrollToItem,
+                updateOpaqueState: nil
+            )
+            return
+        }
         let (deleteIndices, indicesAndItems, updateIndices) = mergeListsStableWithUpdates(leftList: self.entries, rightList: entries, allUpdated: allUpdated)
         self.entries = entries
         var scrollToItem: ListViewScrollToItem?
@@ -148,6 +179,29 @@ public final class MusicPlayerQueueListNode: ASDisplayNode {
         )
     }
 
+    /// The same tracks in a new order that is more than one block moved: a block move changes the track before at most
+    /// three rows, Shuffle and Reverse change it for nearly every row.
+    private static func isReordered(from previous: [MusicPlayerQueueEntry], to updated: [MusicPlayerQueueEntry]) -> Bool {
+        guard previous.count == updated.count, previous.count > 4 else {
+            return false
+        }
+        var previousBefore: [EngineMessage.Id: EngineMessage.Id?] = [:]
+        previousBefore.reserveCapacity(previous.count)
+        for (index, entry) in previous.enumerated() {
+            previousBefore[entry.stableId] = index == 0 ? nil : previous[index - 1].stableId
+        }
+        var changed = 0
+        for (index, entry) in updated.enumerated() {
+            guard let before = previousBefore[entry.stableId] else {
+                return false
+            }
+            if before != (index == 0 ? nil : updated[index - 1].stableId) {
+                changed += 1
+            }
+        }
+        return changed > 3
+    }
+
     public func updateLayout(size: CGSize, insets: UIEdgeInsets, transition: ContainedViewLayoutTransition) {
         // The sheet lays out again on every player and library update; an unchanged size must not run a list
         // transaction in the middle of a drag or a scroll.
@@ -157,9 +211,8 @@ public final class MusicPlayerQueueListNode: ASDisplayNode {
         let isFirstLayout = self.validLayout == nil
         self.validLayout = (size, insets)
         transition.updateFrame(node: self.listNode, frame: CGRect(origin: CGPoint(), size: size))
-        var listInsets = insets
-        // Room below the last track, so the playing one can reach the top even at the end of the queue.
-        listInsets.bottom = max(insets.bottom, size.height - MusicPlayerQueueListNode.rowHeight)
+        // The list ends at its last track: the playing one goes to the top only as far as the tracks below allow.
+        let listInsets = insets
         let (duration, curve) = listViewAnimationDurationAndCurve(transition: transition)
         var scrollToItem: ListViewScrollToItem?
         if isFirstLayout, let currentIndex = self.entries.firstIndex(where: { $0.message.id == self.currentId }) {
@@ -169,8 +222,7 @@ public final class MusicPlayerQueueListNode: ASDisplayNode {
         self.updateVisualInsets()
     }
 
-    /// What is actually on screen: the list's own bottom inset is room to bring the last track to the top, not a
-    /// visible area. While dragging, the edges move in by a row less the client's 10 pt, so scrolling starts when the
+    /// What is actually on screen. While dragging, the edges move in by a row less the client's 10 pt, so scrolling starts when the
     /// dragged row reaches the first or the last visible row.
     private func updateVisualInsets() {
         guard let (_, insets) = self.validLayout else {

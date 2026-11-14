@@ -320,27 +320,41 @@ public final class MediaNavigationAccessoryHeaderNode: ASDisplayNode, ASScrollVi
             } else {
                 strongSelf.playbackBaseRate = .x1
             }
+            strongSelf.updatePlayPauseState(status: status)
         }
+    }
+    
+    // The icon follows the raw player status. The scrubbing node's own
+    // `playbackStatusUpdated` treats any pause as "still playing" when
+    // `timestamp > duration - 0.1`, which is always true while the duration is
+    // unknown (0): the pause was swallowed and, since that callback fires only on
+    // changes, the icon never came back.
+    private var previousPlayerStatus: MediaPlayerStatus?
+    
+    private func updatePlayPauseState(status: MediaPlayerStatus?) {
+        let previousStatus = self.previousPlayerStatus
+        self.previousPlayerStatus = status
         
-        self.scrubbingNode.playbackStatusUpdated = { [weak self] status in
-            if let strongSelf = self {
-                let paused: Bool
-                if let status = status {
-                    switch status {
-                        case .paused:
-                            paused = true
-                        case let .buffering(_, whilePlaying, _, _):
-                            paused = !whilePlaying
-                        case .playing:
-                            paused = false
-                    }
+        let paused: Bool
+        if let status = status {
+            switch status.status {
+            case .paused:
+                // Keep the pause glyph while a finished track hands over to the next one.
+                if case .playing = previousStatus?.status, status.duration > 0.0, status.timestamp > status.duration - 0.1 {
+                    paused = false
                 } else {
                     paused = true
                 }
-                strongSelf.playPauseIconNode.enqueueState(paused ? .play : .pause, animated: true)
-                strongSelf.actionButton.accessibilityLabel = paused ? strongSelf.strings.VoiceOver_Media_PlaybackPlay : strongSelf.strings.VoiceOver_Media_PlaybackPause
+            case let .buffering(_, whilePlaying, _, _):
+                paused = !whilePlaying
+            case .playing:
+                paused = false
             }
+        } else {
+            paused = true
         }
+        self.playPauseIconNode.enqueueState(paused ? .play : .pause, animated: true)
+        self.actionButton.accessibilityLabel = paused ? self.strings.VoiceOver_Media_PlaybackPlay : self.strings.VoiceOver_Media_PlaybackPause
     }
     
     override public func didLoad() {

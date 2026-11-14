@@ -26,6 +26,8 @@ final class ShareScreenSendCoordinator {
     var mediaStartTimestamp: Int32?
     var willEnqueue: (([EnginePeer.Id]) -> Void)?
     var hidesSenderNames = false
+    /// Music shares forward tracks without the caption of the source chat message.
+    var hidesCaptions = false
 
     init(context: AccountContext, subject: ShareScreen.Subject) {
         self.context = context
@@ -256,8 +258,8 @@ final class ShareScreenSendCoordinator {
             if self.silently {
                 attributes.append(NotificationInfoMessageAttribute(flags: .muted))
             }
-            if self.hidesSenderNames {
-                attributes.append(ForwardOptionsMessageAttribute(hideNames: true, hideCaptions: false))
+            if self.hidesSenderNames || self.hidesCaptions {
+                attributes.append(ForwardOptionsMessageAttribute(hideNames: self.hidesSenderNames, hideCaptions: self.hidesCaptions))
             }
             func textMessage(_ text: NSAttributedString, mediaReference: AnyMediaReference? = nil) -> EnqueueMessage {
                 let correlationId = Int64.random(in: Int64.min ... Int64.max)

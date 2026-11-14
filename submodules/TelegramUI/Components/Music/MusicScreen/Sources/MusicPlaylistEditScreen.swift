@@ -163,7 +163,7 @@ private enum MusicPlaylistEditEntry: ItemListNodeEntry {
             }, editingNameCompleted: {
             }, avatarTapped: {
                 arguments.changeCover()
-            }, updatingImage: cover.flatMap { .image($0, false) }, tag: MusicPlaylistEditEntryTag.info, namePlaceholder: musicString(strings, ru: "Название плейлиста", en: "Playlist Name"))
+            }, updatingImage: cover.flatMap { .image($0, false) }, tag: MusicPlaylistEditEntryTag.info, namePlaceholder: strings.Music_PlaylistName)
         case let .description(text, placeholder):
             return ItemListMultilineInputItem(presentationData: presentationData, systemStyle: .glass, text: text, placeholder: placeholder, maxLength: ItemListMultilineInputItemTextLimit(value: 255, display: true), sectionId: self.section, style: .blocks, textUpdated: { text in
                 arguments.updateDescription(text)
@@ -411,7 +411,7 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
         endEditingImpl?()
         let state = stateValue.with { $0 }
         let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
-        let title = state.title.isEmpty ? musicString(strings, ru: "Плейлист", en: "Playlist") : state.title
+        let title = state.title.isEmpty ? strings.Music_Playlist : state.title
         let picker = MusicTrackPicker(playlistTitle: title, trackIds: state.trackIds, completion: { trackIds in
             updateState { state in
                 var state = state
@@ -474,13 +474,13 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
         let leftButton = ItemListNavigationButton(content: .icon(.close), style: .regular, enabled: true, action: {
             dismissImpl?()
         })
-        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text(musicString(strings, ru: "Плейлист", en: "Playlist")), leftNavigationButton: leftButton, rightNavigationButton: rightButton, backNavigationButton: ItemListBackButton(title: strings.Common_Back))
+        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text(strings.Music_Playlist), leftNavigationButton: leftButton, rightNavigationButton: rightButton, backNavigationButton: ItemListBackButton(title: strings.Common_Back))
 
         var entries: [MusicPlaylistEditEntry] = [
             .info(title: state.title, cover: state.cover),
-            .description(text: state.description, placeholder: musicString(strings, ru: "Описание", en: "Description")),
-            .descriptionInfo(musicString(strings, ru: "Можете описать свой плейлист.", en: "You can describe your playlist.")),
-            .addTracks(musicString(strings, ru: "Добавить треки", en: "Add Tracks"))
+            .description(text: state.description, placeholder: strings.Music_Description),
+            .descriptionInfo(strings.Music_YouCanDescribeYourPlaylist),
+            .addTracks(strings.Music_AddTracks)
         ]
         var byId: [EngineMessage.Id: MusicTrack] = [:]
         for track in library.allTracks {

@@ -10,6 +10,76 @@ import ButtonComponent
 import BundleIconComponent
 import MultilineTextComponent
 import DynamicIslandMask
+import AccountContext
+import TelegramCore
+import AvatarNode
+
+/// Lies over the list and lets it take every touch except the author's line, which opens the author's profile.
+private final class MusicPlaylistHeaderOverlayView: UIView {
+    var interactiveViews: () -> [UIView] = { [] }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if self.isHidden || self.alpha < 0.01 {
+            return nil
+        }
+        for view in self.interactiveViews() {
+            if view.superview === self, !view.isHidden, view.alpha > 0.1, view.isUserInteractionEnabled, view.point(inside: self.convert(point, to: view), with: event) {
+                return view
+            }
+        }
+        return nil
+    }
+}
+
+/// The status line under the name: plain text, or the playlist's author drawn as a forwarded message's author — a
+/// small round avatar and the name in medium in the peer's name colour — followed by the rest of the line.
+private final class MusicPlaylistSubtitleView: UIView {
+    /// The forwarded header's 16 pt avatar beside 14 pt text, scaled to the status's 17 pt; 4 pt before the name.
+    static let avatarSize: CGFloat = 20.0
+    static let avatarSpacing: CGFloat = 4.0
+
+    private let text = ComponentView<Empty>()
+    private var avatarNode: AvatarNode?
+
+    func update(context: AccountContext?, theme: PresentationTheme, peer: EnginePeer?, string: NSAttributedString, constrainedWidth: CGFloat) -> CGSize {
+        let avatarInset: CGFloat = peer != nil && context != nil ? MusicPlaylistSubtitleView.avatarSize + MusicPlaylistSubtitleView.avatarSpacing : 0.0
+        let textSize = self.text.update(
+            transition: .immediate,
+            component: AnyComponent(MultilineTextComponent(text: .plain(string), truncationType: .end, maximumNumberOfLines: 1)),
+            environment: {},
+            containerSize: CGSize(width: max(1.0, constrainedWidth - avatarInset), height: 100.0)
+        )
+        let height = max(textSize.height, avatarInset > 0.0 ? MusicPlaylistSubtitleView.avatarSize : 0.0)
+        if let textView = self.text.view {
+            if textView.superview == nil {
+                self.addSubview(textView)
+            }
+            textView.frame = CGRect(origin: CGPoint(x: avatarInset, y: floor((height - textSize.height) / 2.0)), size: textSize)
+        }
+        if let context, let peer {
+            let avatarNode: AvatarNode
+            if let current = self.avatarNode {
+                avatarNode = current
+            } else {
+                avatarNode = AvatarNode(font: avatarPlaceholderFont(size: 9.0))
+                self.avatarNode = avatarNode
+                self.addSubview(avatarNode.view)
+            }
+            let avatarSize = CGSize(width: MusicPlaylistSubtitleView.avatarSize, height: MusicPlaylistSubtitleView.avatarSize)
+            avatarNode.frame = CGRect(origin: CGPoint(x: 0.0, y: floor((height - avatarSize.height) / 2.0)), size: avatarSize)
+            avatarNode.updateSize(size: avatarSize)
+            if peer.smallProfileImage != nil {
+                avatarNode.setPeerV2(context: context, theme: theme, peer: peer, displayDimensions: avatarSize)
+            } else {
+                avatarNode.setPeer(context: context, theme: theme, peer: peer, displayDimensions: avatarSize)
+            }
+        } else if let avatarNode = self.avatarNode {
+            self.avatarNode = nil
+            avatarNode.view.removeFromSuperview()
+        }
+        return CGSize(width: avatarInset + textSize.width, height: height)
+    }
+}
 
 /// The top of a playlist, laid out as a profile's header (`PeerInfoHeaderNode`) with the same metrics and motion
 /// (Figma Playlist / Default, / No Cover, / Avatar Small, / Avatar Hidden).
@@ -18,9 +88,20 @@ import DynamicIslandMask
 /// the avatar shrinks to 0.55 and melts into the Dynamic Island through the profile's mask and blur, while the name and
 /// status shrink into the bar. The header lies under the list and follows its offset.
 final class MusicPlaylistHeaderView: UIView {
+    /// The playlist's author with the rest of the status line (the track count), shown as a forwarded message's author.
+    struct Author {
+        let context: AccountContext
+        let peer: EnginePeer
+        let name: String
+        let nameColor: UIColor
+        let suffix: String
+    }
+
     /// Figma Playlist/Name and Playlist/Status: the profile's title and status sizes.
     static let titleFont = Font.semibold(28.0)
     static let subtitleFont = Font.regular(17.0)
+    /// A forwarded message's author name is medium.
+    static let subtitleAuthorFont = Font.medium(17.0)
     static let avatarSize: CGFloat = 100.0
     private static let titleHeight: CGFloat = 34.0
     private static let subtitleHeight: CGFloat = 22.0
@@ -56,10 +137,12 @@ final class MusicPlaylistHeaderView: UIView {
     /// expanded, left-aligned and white over the cover. A fold moves them together and crossfades the states.
     private let regularTitle = ComponentView<Empty>()
     private let expandedTitle = ComponentView<Empty>()
-    private let regularSubtitle = ComponentView<Empty>()
-    private let expandedSubtitle = ComponentView<Empty>()
+    private let regularSubtitle = MusicPlaylistSubtitleView()
+    private let expandedSubtitle = MusicPlaylistSubtitleView()
     /// The name and status, kept above the list and the bar's fade by the screen: they rise into the bar.
-    let overlayView = UIView()
+    let overlayView: UIView = MusicPlaylistHeaderOverlayView()
+    /// Set while the status shows the author: a tap on it opens the author's profile.
+    var authorPressed: (() -> Void)?
     /// False when the name at the bar's size would reach the bar's buttons: the bar then shows its own truncated title.
     private(set) var titleRisesIntoBar = false
 
@@ -71,7 +154,18 @@ final class MusicPlaylistHeaderView: UIView {
         super.init(frame: frame)
 
         self.isUserInteractionEnabled = false
-        self.overlayView.isUserInteractionEnabled = false
+        if let overlayView = self.overlayView as? MusicPlaylistHeaderOverlayView {
+            overlayView.interactiveViews = { [weak self] in
+                guard let self else {
+                    return []
+                }
+                return [self.regularSubtitle, self.expandedSubtitle]
+            }
+        }
+        for subtitleView in [self.regularSubtitle, self.expandedSubtitle] {
+            subtitleView.isUserInteractionEnabled = false
+            subtitleView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.subtitleTapped)))
+        }
         self.clippingView.clipsToBounds = true
         self.coverContainer.clipsToBounds = true
         self.coverImageView.contentMode = .scaleAspectFill
@@ -91,6 +185,10 @@ final class MusicPlaylistHeaderView: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func subtitleTapped() {
+        self.authorPressed?()
     }
 
     /// The height the header takes at rest: the list starts under it.
@@ -150,7 +248,7 @@ final class MusicPlaylistHeaderView: UIView {
     }
 
     /// `offset` is the list's: 0 at rest, negative while pulled down.
-    func update(theme: PresentationTheme, title: String, subtitle: String, cover: UIImage?, isExpanded: Bool, size: CGSize, statusBarHeight: CGFloat, hasDynamicIsland: Bool, offset: CGFloat, transition: ContainedViewLayoutTransition) {
+    func update(theme: PresentationTheme, title: String, subtitle: String, author: Author? = nil, cover: UIImage?, isExpanded: Bool, size: CGSize, statusBarHeight: CGFloat, hasDynamicIsland: Bool, offset: CGFloat, transition: ContainedViewLayoutTransition) {
         let width = size.width
         let sideInset: CGFloat = 16.0
         let isExpanded = isExpanded && cover != nil
@@ -166,8 +264,18 @@ final class MusicPlaylistHeaderView: UIView {
         }
         let titleSize = text(self.regularTitle, title, MusicPlaylistHeaderView.titleFont, theme.list.itemPrimaryTextColor)
         let expandedTitleSize = text(self.expandedTitle, title, MusicPlaylistHeaderView.titleFont, .white)
-        let subtitleSize = text(self.regularSubtitle, subtitle, MusicPlaylistHeaderView.subtitleFont, theme.list.itemSecondaryTextColor)
-        let expandedSubtitleSize = text(self.expandedSubtitle, subtitle, MusicPlaylistHeaderView.subtitleFont, .white)
+        let subtitleString: (UIColor, UIColor) -> NSAttributedString = { nameColor, color in
+            guard let author else {
+                return NSAttributedString(string: subtitle, font: MusicPlaylistHeaderView.subtitleFont, textColor: color)
+            }
+            let string = NSMutableAttributedString(string: author.name, font: MusicPlaylistHeaderView.subtitleAuthorFont, textColor: nameColor)
+            string.append(NSAttributedString(string: author.suffix, font: MusicPlaylistHeaderView.subtitleFont, textColor: color))
+            return string
+        }
+        self.regularSubtitle.isUserInteractionEnabled = author != nil
+        self.expandedSubtitle.isUserInteractionEnabled = author != nil
+        let subtitleSize = self.regularSubtitle.update(context: author?.context, theme: theme, peer: author?.peer, string: subtitleString(author?.nameColor ?? theme.list.itemSecondaryTextColor, theme.list.itemSecondaryTextColor), constrainedWidth: textSize.width)
+        let expandedSubtitleSize = self.expandedSubtitle.update(context: author?.context, theme: theme, peer: author?.peer, string: subtitleString(.white, .white), constrainedWidth: textSize.width)
 
         if let cover {
             if self.coverImageView.image !== cover {
@@ -327,8 +435,17 @@ final class MusicPlaylistHeaderView: UIView {
         self.overlayView.frame = CGRect(origin: CGPoint(), size: size)
         place(self.regularTitle, titleSize, regularTitleCenter, titleScale, isExpanded ? 0.0 : titleAlpha)
         place(self.expandedTitle, expandedTitleSize, expandedTitleCenter, titleScale, isExpanded ? titleAlpha : 0.0)
-        place(self.regularSubtitle, subtitleSize, regularSubtitleCenter, subtitleScale, isExpanded ? 0.0 : subtitleAlpha)
-        place(self.expandedSubtitle, expandedSubtitleSize, expandedSubtitleCenter, subtitleScale, isExpanded ? subtitleAlpha : 0.0)
+        let placeView: (UIView, CGSize, CGPoint, CGFloat, CGFloat) -> Void = { view, size, center, scale, alpha in
+            if view.superview == nil {
+                self.overlayView.addSubview(view)
+            }
+            view.bounds = CGRect(origin: CGPoint(), size: size)
+            MusicPlaylistHeaderView.setPosition(view.layer, center, transition: transition)
+            MusicPlaylistHeaderView.setScale(view.layer, scale, transition: transition)
+            transition.updateAlpha(layer: view.layer, alpha: alpha)
+        }
+        placeView(self.regularSubtitle, subtitleSize, regularSubtitleCenter, subtitleScale, isExpanded ? 0.0 : subtitleAlpha)
+        placeView(self.expandedSubtitle, expandedSubtitleSize, expandedSubtitleCenter, subtitleScale, isExpanded ? subtitleAlpha : 0.0)
     }
 }
 
@@ -471,8 +588,8 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
     let isFavorite: Bool
     let playTitle: String
     let addTracksTitle: String
-    /// Set on a playlist opened inside the track picker: Add (all its tracks) and Search, two equal buttons (Figma Playlists / Add Track).
-    let pickerTitles: (add: String, search: String)?
+    /// Set on a playlist opened inside the track picker: one full-width Add button for all its tracks (Figma Playlists / Add Track 176:29747).
+    let pickerAddTitle: String?
     let topInset: CGFloat
     let bottomInset: CGFloat
     let sectionId: ItemListSectionId
@@ -480,13 +597,13 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
 
     let selectable: Bool = false
 
-    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, playTitle: String, addTracksTitle: String, pickerTitles: (add: String, search: String)? = nil, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
+    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, playTitle: String, addTracksTitle: String, pickerAddTitle: String? = nil, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
         self.theme = theme
         self.isEmpty = isEmpty
         self.isFavorite = isFavorite
         self.playTitle = playTitle
         self.addTracksTitle = addTracksTitle
-        self.pickerTitles = pickerTitles
+        self.pickerAddTitle = pickerAddTitle
         self.topInset = topInset
         self.bottomInset = bottomInset
         self.sectionId = sectionId
@@ -565,18 +682,14 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
         }
     }
 
-    /// Add and Search at the same 17 pt semibold title and 24 pt glyph as every other button of the section.
-    private func layoutPickerButtons(item: MusicPlaylistActionsItem, titles: (add: String, search: String), leftX: CGFloat, rightX: CGFloat, spacing: CGFloat, height: CGFloat) {
+    /// Add at the same 17 pt semibold title and 24 pt glyph as every other button of the section, across the full width.
+    private func layoutPickerButton(item: MusicPlaylistActionsItem, title: String, leftX: CGFloat, rightX: CGFloat, height: CGFloat) {
         let theme = item.theme
-        let width = floor((rightX - leftX - spacing) / 2.0)
         let accent = theme.list.itemCheckColors.fillColor
         let accentForeground = theme.list.itemCheckColors.foregroundColor
         let accentBackground = ButtonComponent.Background(style: .actualGlass, color: accent, foreground: accentForeground, pressedColor: accent, cornerRadius: height * 0.5)
-        let glass = theme.overallDarkAppearance ? UIColor(white: 0.0, alpha: 0.01) : UIColor(white: 1.0, alpha: 0.01)
-        let foreground = theme.list.itemPrimaryTextColor
-        let glassBackground = ButtonComponent.Background(style: .actualGlass, color: glass, foreground: foreground, pressedColor: glass, cornerRadius: height * 0.5)
-        self.updateButton(self.mainButton, background: accentBackground, content: MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Add", iconSize: CGSize(width: 24.0, height: 24.0), title: titles.add, color: accentForeground), frame: CGRect(x: leftX, y: 0.0, width: width, height: height), action: .addAll)
-        self.updateButton(self.searchButton, background: glassBackground, content: MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Search", iconSize: CGSize(width: 24.0, height: 24.0), title: titles.search, color: foreground), frame: CGRect(x: leftX + width + spacing, y: 0.0, width: width, height: height), action: .search)
+        self.updateButton(self.mainButton, background: accentBackground, content: MusicPlaylistActionsItemNode.titleContent(icon: "Chat/Context Menu/Add", iconSize: CGSize(width: 24.0, height: 24.0), title: title, color: accentForeground), frame: CGRect(x: leftX, y: 0.0, width: rightX - leftX, height: height), action: .addAll)
+        self.searchButton.view?.isHidden = true
         self.shuffleButton.view?.isHidden = true
         self.favoriteButton.view?.isHidden = true
     }
@@ -595,8 +708,8 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 let spacing: CGFloat = 8.0
                 let leftX = params.leftInset + sideInset
                 let rightX = params.width - params.rightInset - sideInset
-                if let pickerTitles = item.pickerTitles {
-                    self.layoutPickerButtons(item: item, titles: pickerTitles, leftX: leftX, rightX: rightX, spacing: spacing, height: height)
+                if let pickerAddTitle = item.pickerAddTitle {
+                    self.layoutPickerButton(item: item, title: pickerAddTitle, leftX: leftX, rightX: rightX, height: height)
                     return
                 }
                 let roundCount: CGFloat = item.isEmpty ? 1.0 : 3.0

@@ -106,6 +106,8 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let richMessageQueueId: EngineMessage.Id?
     let isStoryMusic: Bool
     let isAttachMusic: Bool
+    /// With a selection, only a tap on the checkmark's column selects; a tap on the rest of the row opens the message.
+    public let selectsOnControlOnly: Bool
     let displayFileInfo: Bool
     let audioInfo: ListMessageItemAudioInfo
     let hidesAudioFileExtension: Bool
@@ -123,6 +125,9 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
     let rightRevealOptions: [ListMessageItemRevealOption]
     /// A static glyph at the end of the row, such as a favorite mark.
     let trailingIcon: UIImage?
+    /// Music section concept: a music row keeps room in its trailing area for the double note shown while its
+    /// file is in Music (shared media of a chat). Ignored while `trailingIcon` is set.
+    let showsMusicLibraryMark: Bool
     let editControl: ListMessageItemEditControl?
     /// A music track shows its cover alone in place of the play button: the row itself plays it.
     let displaysAudioCover: Bool
@@ -166,6 +171,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         isSavedMusic: Bool = false,
         isStoryMusic: Bool = false,
         isAttachMusic: Bool = false,
+        selectsOnControlOnly: Bool = false,
         displayFileInfo: Bool = true,
         audioInfo: ListMessageItemAudioInfo = .default,
         hidesAudioFileExtension: Bool = false,
@@ -180,6 +186,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         leftRevealOptions: [ListMessageItemRevealOption] = [],
         rightRevealOptions: [ListMessageItemRevealOption] = [],
         trailingIcon: UIImage? = nil,
+        showsMusicLibraryMark: Bool = false,
         editControl: ListMessageItemEditControl? = nil,
         displaysAudioCover: Bool = false,
         playingIndicator: ListMessageItemPlayingIndicator? = nil,
@@ -209,6 +216,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.richMessageQueueId = richMessageQueueId
         self.isStoryMusic = isStoryMusic
         self.isAttachMusic = isAttachMusic
+        self.selectsOnControlOnly = selectsOnControlOnly
         self.displayFileInfo = displayFileInfo
         self.audioInfo = audioInfo
         self.hidesAudioFileExtension = hidesAudioFileExtension
@@ -222,6 +230,7 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
         self.leftRevealOptions = leftRevealOptions
         self.rightRevealOptions = rightRevealOptions
         self.trailingIcon = trailingIcon
+        self.showsMusicLibraryMark = showsMusicLibraryMark
         self.editControl = editControl
         self.displaysAudioCover = displaysAudioCover
         self.playingIndicator = playingIndicator
@@ -315,8 +324,10 @@ public final class ListMessageItem: ListViewItem, ItemListItem {
             return
         }
         
-        if case let .selectable(selected, _) = self.selection {
+        if case let .selectable(selected, _) = self.selection, !self.selectsOnControlOnly {
             self.interaction.toggleMessagesSelection([message.id], !selected)
+        } else if case .selectable = self.selection {
+            let _ = self.interaction.openMessage(message, .default)
         } else {
             if !self.displayFileInfo || self.isAttachMusic {
                 let _ = self.interaction.openMessage(message, .default)

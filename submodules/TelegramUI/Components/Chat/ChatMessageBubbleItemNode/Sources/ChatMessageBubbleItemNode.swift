@@ -43,6 +43,7 @@ import ChatMessageCallBubbleContentNode
 import ChatMessageInteractiveFileNode
 import ChatMessageFileBubbleContentNode
 import ChatMessageWebpageBubbleContentNode
+import ChatMessageMusicPlaylistBubbleContentNode
 import ChatMessagePollBubbleContentNode
 import ChatMessageTodoBubbleContentNode
 import ChatMessageItem
@@ -137,6 +138,15 @@ private func contentNodeMessagesAndClassesForItem(_ item: ChatMessageItem) -> ([
     var addedPollMedia = false
     var addedQuizAnswer = false
     
+    // Music section concept: a group of tracks sent together shows its first tracks and Show All for the rest.
+    var collapsesMusicGroup = false
+    if isMusicSectionEnabled, case let .group(messages) = item.content, messages.count > chatMessageMusicGroupPreviewCount, messages.allSatisfy({ entry in
+        return entry.0.media.contains(where: { ($0 as? TelegramMediaFile)?.isMusic == true })
+    }) {
+        collapsesMusicGroup = true
+    }
+    var musicGroupFileCount = 0
+
     outer: for (message, itemAttributes) in item.content {
         for attribute in message.attributes {
             if let attribute = attribute as? RestrictedContentMessageAttribute, attribute.platformText(platform: "ios", contentSettings: item.context.currentContentSettings.with { $0 }) != nil {
@@ -221,7 +231,16 @@ private func contentNodeMessagesAndClassesForItem(_ item: ChatMessageItem) -> ([
                     }
                     isFile = true
                     hasFiles = true
-                    result.append((message, ChatMessageFileBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .text, neighborSpacing: neighborSpacing)))
+                    if collapsesMusicGroup {
+                        musicGroupFileCount += 1
+                    }
+                    if collapsesMusicGroup && musicGroupFileCount > chatMessageMusicGroupPreviewCount {
+                        if musicGroupFileCount == chatMessageMusicGroupPreviewCount + 1 {
+                            result.append((message, ChatMessageMusicGroupShowAllBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .text, neighborSpacing: .condensed)))
+                        }
+                    } else {
+                        result.append((message, ChatMessageFileBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .text, neighborSpacing: neighborSpacing)))
+                    }
                     needReactions = false
                 }
             } else if let action = media as? TelegramMediaAction {
@@ -394,6 +413,12 @@ private func contentNodeMessagesAndClassesForItem(_ item: ChatMessageItem) -> ([
         inner: for media in message.media {
             if let webpage = media as? TelegramMediaWebpage {
                 if case let .Loaded(content) = webpage.content {
+                    // Music section concept: a shared playlist draws its own card instead of a link preview.
+                    if content.type == chatMessageMusicPlaylistWebpageType {
+                        result.append((message, ChatMessageMusicPlaylistBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .text, neighborSpacing: .default)))
+                        needReactions = false
+                        break inner
+                    }
                     if let story = content.story {
                         if let storyItem = message.associatedStories[story.storyId], !storyItem.data.isEmpty {
                         } else {
@@ -5045,7 +5070,8 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
                 strongSelf.contentContainersWrapperNode.view.mask = currentMaskView
             }
             
-            currentMaskView?.frame = CGRect(origin: CGPoint(x: backgroundFrame.minX, y: 0.0), size: backgroundFrame.size).insetBy(dx: -1.0, dy: -1.0)
+            // The bubble sits below the attached date header (layoutInsets.top), so the mask follows its real origin.
+            currentMaskView?.frame = backgroundFrame.insetBy(dx: -1.0, dy: -1.0)
             currentMaskView?.image = bubbleMaskForType(backgroundType, graphics: graphics)
         } else {
             strongSelf.contentContainersWrapperNode.view.mask = nil

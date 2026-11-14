@@ -987,7 +987,9 @@ func enqueueMessages(transaction: Transaction, account: Account, peerId: PeerId,
 
             var attributes: [MessageAttribute] = []
             var flags = StoreMessageFlags()
-            flags.insert(.Unsent)
+            if !isMusicTestChat(peerId) {
+                flags.insert(.Unsent)
+            }
             
             var randomId: Int64 = 0
             arc4random_buf(&randomId, 8)

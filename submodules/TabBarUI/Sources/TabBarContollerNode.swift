@@ -383,7 +383,7 @@ final class TabBarControllerNode: ASDisplayNode {
                         return GlassControlPanelComponent.Item(
                             items: [GlassControlGroupComponent.Item(
                                 id: "left_" + value.title,
-                                content: .text(value.title),
+                                content: value.icon.flatMap { GlassControlGroupComponent.Item.Content.icon($0) } ?? .text(value.title),
                                 action: value.isEnabled ? { [weak self] in
                                     guard let self else {
                                         return
@@ -398,7 +398,7 @@ final class TabBarControllerNode: ASDisplayNode {
                         return GlassControlPanelComponent.Item(
                             items: [GlassControlGroupComponent.Item(
                                 id: "right_" + value.title,
-                                content: .text(value.title),
+                                content: value.icon.flatMap { GlassControlGroupComponent.Item.Content.icon($0) } ?? .text(value.title),
                                 action: value.isEnabled ? { [weak self] in
                                     guard let self else {
                                         return
@@ -413,7 +413,7 @@ final class TabBarControllerNode: ASDisplayNode {
                         return GlassControlPanelComponent.Item(
                             items: [GlassControlGroupComponent.Item(
                                 id: "right_" + value.title,
-                                content: .text(value.title),
+                                content: value.icon.flatMap { GlassControlGroupComponent.Item.Content.icon($0) } ?? .text(value.title),
                                 action: value.isEnabled ? { [weak self] in
                                     guard let self else {
                                         return

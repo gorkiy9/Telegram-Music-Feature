@@ -295,12 +295,22 @@ public final class ShareScreen: ViewControllerComponentContainer {
         didSet { self.refreshComponent() }
     }
     public var canSendInHighQuality = false
+    /// Forwards go without the source message caption, and without the "Forwarded from" header unless the user turns sender names back on in the send
+    /// options (the Music section shares this way).
+    public var hidesSenderNamesByDefault = false {
+        didSet {
+            self.showSenderNames.set(!self.hidesSenderNamesByDefault)
+            self.sender.hidesSenderNames = self.hidesSenderNamesByDefault && self.sender.sendsForwards
+            self.sender.hidesCaptions = self.hidesSenderNamesByDefault && self.sender.sendsForwards
+        }
+    }
     fileprivate let externalConfiguration: ShareScreenExternalConfiguration?
     fileprivate var loadingNode: ASDisplayNode?
     fileprivate var captureCaption: (() -> NSAttributedString)?
     private let accountInUse = MetaDisposable()
     private let completionDisposable = MetaDisposable()
     private var uploadCompleted = false
+    private var enqueuingPeerIds: [EnginePeer.Id] = []
     private let preferredAction: ShareControllerPreferredAction
     fileprivate let externalShareSubject: ShareControllerSubject?
     private let shareAsLink: Bool
@@ -459,6 +469,8 @@ public final class ShareScreen: ViewControllerComponentContainer {
     }
 
     private func configureSender() {
+        self.sender.hidesSenderNames = self.hidesSenderNamesByDefault && self.sender.sendsForwards
+        self.sender.hidesCaptions = self.hidesSenderNamesByDefault && self.sender.sendsForwards
         self.sender.updated = { [weak self] in
             guard let self else { return }
             if !self.sender.isSending { self.loadingNode = nil }
@@ -469,6 +481,7 @@ public final class ShareScreen: ViewControllerComponentContainer {
         self.sender.navigationController = { [weak self] in self?.navigationController as? NavigationController }
         self.sender.willEnqueue = { [weak self] ids in
             guard let self else { return }
+            self.enqueuingPeerIds = ids
             let environment: ShareControllerEnvironment = self.externalConfiguration?.environment ?? ShareControllerAppEnvironment(sharedContext: self.context.sharedContext)
             environment.donateSendMessageIntent(account: ShareControllerAppAccountContext(context: self.context), peerIds: ids)
         }
@@ -560,7 +573,17 @@ public final class ShareScreen: ViewControllerComponentContainer {
     }
 
     private func updateExternalStatus(_ status: ShareControllerExternalStatus) {
-        guard let configuration = self.externalConfiguration, !self.uploadCompleted else { return }
+        guard !self.uploadCompleted else { return }
+        guard let configuration = self.externalConfiguration else {
+            // In the app a `.fromExternal` subject enqueues its own messages: finish as an ordinary send does
+            // (`sender.enqueued`: haptic, `enqueued`/`completed` for the caller's toast, close), without the
+            // extension's loading screen.
+            if case .done = status {
+                self.uploadCompleted = true
+                self.sender.enqueued?(self.enqueuingPeerIds, [])
+            }
+            return
+        }
         let data = self.context.sharedContext.currentPresentationData.with { $0 }
         if self.loadingNode == nil { self.caption = self.captureCaption?() ?? self.caption }
         self.view.endEditing(true)

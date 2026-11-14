@@ -1561,6 +1561,27 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
                     break
                 }
             }
+
+            // Music section concept: the message's tracks (a whole group with Select All) go into Music, on this
+            // device, as the player's Add does.
+            // Only tracks not in Music yet: with all of them there, the item is not offered.
+            let musicMessages = (selectAll ? messages : [message]).filter { message in
+                return message.media.contains(where: { media in
+                    guard let file = media as? TelegramMediaFile, file.isMusic else {
+                        return false
+                    }
+                    return !context.sharedContext.musicLibraryContainsFile(context: context, fileId: file.fileId.id)
+                })
+            }
+            if isMusicSectionEnabled && !musicMessages.isEmpty {
+                let title = chatPresentationInterfaceState.strings.Music_AddToMusic
+                actions.append(.action(ContextMenuActionItem(text: title, icon: { theme in
+                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/AddMusic"), color: theme.actionSheet.primaryTextColor)
+                }, action: { _, f in
+                    f(.default)
+                    context.sharedContext.addMusicTracksToLibrary(context: context, messages: musicMessages)
+                })))
+            }
         }
         
         if (loggingSettings.logToFile || loggingSettings.logToConsole) && !downloadableMediaResourceInfos.isEmpty {

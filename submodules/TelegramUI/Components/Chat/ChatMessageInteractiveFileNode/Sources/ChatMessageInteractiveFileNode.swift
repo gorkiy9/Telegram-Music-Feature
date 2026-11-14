@@ -13,6 +13,7 @@ import SemanticStatusNode
 import FileMediaResourceStatus
 import CheckNode
 import MusicAlbumArtResources
+import ListMessageItem
 import AudioBlob
 import ContextUI
 import ChatPresentationInterfaceState
@@ -137,10 +138,17 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
     
     public let dateAndStatusNode: ChatMessageDateAndStatusNode
     private let consumableContentNode: ASImageNode
+    /// Music section concept: the double note before the artist of a track that is in Music.
+    private let musicLibraryMarkNode: ASImageNode
+    private var musicLibraryMarkColor: UIColor?
+    private var isMarkedAsInMusicLibrary = false
+    private let musicLibraryDisposable = MetaDisposable()
+    private var musicLibraryObservedFileId: Int64?
     
     private var iconNode: TransformImageNode?
     public let statusContainerNode: ContextExtractedContentContainingNode
     public var statusNode: SemanticStatusNode?
+    private var playingIndicatorNode: ListMessagePlayingIndicatorNode?
     private var playbackAudioLevelNode: VoiceBlobNode?
     private var streamingStatusNode: SemanticStatusNode?
     private var tapRecognizer: UITapGestureRecognizer?
@@ -260,6 +268,10 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
         self.dateAndStatusNode = ChatMessageDateAndStatusNode()
         
         self.consumableContentNode = ASImageNode()
+        self.musicLibraryMarkNode = ASImageNode()
+        self.musicLibraryMarkNode.displaysAsynchronously = false
+        self.musicLibraryMarkNode.isUserInteractionEnabled = false
+        self.musicLibraryMarkNode.isHidden = true
 
         self.statusContainerNode = ContextExtractedContentContainingNode()
         
@@ -273,6 +285,7 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
     }
     
     deinit {
+        self.musicLibraryDisposable.dispose()
         self.statusDisposable.dispose()
         self.playbackStatusDisposable.dispose()
         self.fetchDisposable.dispose()
@@ -748,7 +761,16 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                 
                 let streamingProgressDiameter: CGFloat = 20.0
                 
+                // Music section concept: a track already in Music carries a double note in the row's trailing area,
+                // so its title and artist leave room for it.
+                let isMusicTrack = isMusicSectionEnabled && isAudio && !isVoice && arguments.file.isMusic
+                let isInMusicLibrary = isMusicTrack && arguments.context.sharedContext.musicLibraryContainsFile(context: arguments.context, fileId: arguments.file.fileId.id)
+                let musicLibraryMarkSize = CGSize(width: 14.0, height: 14.0)
+                let musicLibraryMarkWidth: CGFloat = isInMusicLibrary ? musicLibraryMarkSize.width + 12.0 : 0.0
+                textConstrainedSize.width -= musicLibraryMarkWidth
+                
                 let (titleLayout, titleApply) = titleAsyncLayout(TextNodeLayoutArguments(attributedString: titleString, backgroundColor: nil, maximumNumberOfLines: hasThumbnail ? 2 : 1, truncationType: .middle, constrainedSize: textConstrainedSize, alignment: .natural, cutout: nil, insets: UIEdgeInsets()))
+                
                 let (descriptionLayout, descriptionApply) = descriptionAsyncLayout(TextNodeLayoutArguments(attributedString: descriptionString, backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .middle, constrainedSize: textConstrainedSize, alignment: .natural, cutout: nil, insets: UIEdgeInsets()))
                 
                 let isViewOnceMessage = isVoice && arguments.message.minAutoremoveOrClearTimeout == viewOnceTimeout
@@ -986,7 +1008,7 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                     }
                     minLayoutWidth = max(descriptionAndStatusWidth + 56, minLayoutWidth)
                 } else {
-                    minLayoutWidth = max(titleLayout.size.width, descriptionMaxWidth) + 44.0 + 8.0
+                    minLayoutWidth = max(titleLayout.size.width, descriptionMaxWidth) + 44.0 + 8.0 + musicLibraryMarkWidth
                 }
                 
                 var statusHeightAddition: CGFloat = 0.0
@@ -1031,6 +1053,9 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                     } else {
                         descriptionFrame = CGRect(origin: CGPoint(x: titleFrame.minX, y: titleFrame.maxY - 1.0), size: descriptionLayout.size)
                     }
+                    // At the row's trailing edge, centred on the cover.
+                    let musicLibraryMarkFrame = CGRect(origin: CGPoint(x: max(boundingWidth, max(titleFrame.maxX, descriptionFrame.maxX) + musicLibraryMarkWidth) - musicLibraryMarkSize.width, y: progressFrame.minY + floorToScreenPixels((progressFrame.height - musicLibraryMarkSize.height) / 2.0)), size: musicLibraryMarkSize)
+                    let musicLibraryMarkColor = messageTheme.fileDescriptionColor
                     
                     var fittedLayoutSize: CGSize
                     if hasThumbnail {
@@ -1039,7 +1064,11 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                     } else if isVoice {
                         fittedLayoutSize = CGSize(width: minLayoutWidth, height: 38.0)
                     } else {
-                        let unionSize = titleFrame.union(descriptionFrame).union(progressFrame).size
+                        var unionFrame = titleFrame.union(descriptionFrame).union(progressFrame)
+                        if isInMusicLibrary {
+                            unionFrame = unionFrame.union(musicLibraryMarkFrame)
+                        }
+                        let unionSize = unionFrame.size
                         fittedLayoutSize = CGSize(width: unionSize.width, height: unionSize.height)
                     }
                     
@@ -1086,6 +1115,42 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                             
                             strongSelf.titleNode.frame = titleFrame
                             strongSelf.descriptionNode.frame = descriptionFrame
+                            
+                            strongSelf.isMarkedAsInMusicLibrary = isInMusicLibrary
+                            if isInMusicLibrary {
+                                if strongSelf.musicLibraryMarkNode.supernode == nil {
+                                    strongSelf.addSubnode(strongSelf.musicLibraryMarkNode)
+                                }
+                                if strongSelf.musicLibraryMarkColor != musicLibraryMarkColor || strongSelf.musicLibraryMarkNode.image == nil {
+                                    strongSelf.musicLibraryMarkColor = musicLibraryMarkColor
+                                    strongSelf.musicLibraryMarkNode.image = generateTintedImage(image: UIImage(bundleImageName: "Media Editor/SmallAudio"), color: musicLibraryMarkColor)
+                                }
+                                strongSelf.musicLibraryMarkNode.frame = musicLibraryMarkFrame
+                                strongSelf.musicLibraryMarkNode.isHidden = false
+                            } else {
+                                strongSelf.musicLibraryMarkNode.isHidden = true
+                            }
+                            if isMusicTrack {
+                                let fileId = arguments.file.fileId.id
+                                if strongSelf.musicLibraryObservedFileId != fileId {
+                                    strongSelf.musicLibraryObservedFileId = fileId
+                                    let messageId = arguments.message.id
+                                    let controllerInteraction = arguments.controllerInteraction
+                                    let context = arguments.context
+                                    strongSelf.musicLibraryDisposable.set((context.sharedContext.musicLibraryFileIds(context: context)
+                                    |> map { $0.contains(fileId) }
+                                    |> distinctUntilChanged
+                                    |> deliverOnMainQueue).startStrict(next: { [weak strongSelf] isInLibrary in
+                                        guard let strongSelf, strongSelf.file?.fileId.id == fileId, strongSelf.isMarkedAsInMusicLibrary != isInLibrary else {
+                                            return
+                                        }
+                                        controllerInteraction.requestMessageUpdate(messageId, false, nil)
+                                    }))
+                                }
+                            } else {
+                                strongSelf.musicLibraryObservedFileId = nil
+                                strongSelf.musicLibraryDisposable.set(nil)
+                            }
                             strongSelf.descriptionMeasuringNode.frame = CGRect(origin: CGPoint(), size: descriptionMeasuringLayout.size)
                                     
                             if let updatedAudioTranscriptionState = updatedAudioTranscriptionState {
@@ -1781,9 +1846,29 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
             }
         }
         
+        // Music section concept: a track looks like a Music row — its round cover or the player's placeholder, no play
+        // glyph, the section's sound-wave overlay while playing. Voice messages and round videos are unchanged.
+        let displaysCover = isMusicSectionEnabled && isAudio && !isVoice && file.isMusic && file.fileName?.lowercased().hasSuffix(".ogg") != true
+        var playingIndicator: ListMessageItemPlayingIndicator?
+        if displaysCover {
+            if case let .playbackStatus(playbackStatus) = resourceStatus.mediaStatus {
+                playingIndicator = playbackStatus == .playing ? .playing : .paused
+            }
+            // The cover itself is the control, as in the Music section: no play or pause glyph over it.
+            switch state {
+            case .play, .pause:
+                state = .none
+            default:
+                break
+            }
+        }
+        
         let backgroundNodeColor: UIColor
         let foregroundNodeColor: UIColor
-        if self.iconNode != nil {
+        if displaysCover {
+            backgroundNodeColor = presentationData.theme.theme.list.mediaPlaceholderColor
+            foregroundNodeColor = .white
+        } else if self.iconNode != nil {
             backgroundNodeColor = presentationData.theme.theme.chat.message.mediaOverlayControlColors.fillColor
             foregroundNodeColor = .white
         } else {
@@ -1795,10 +1880,23 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
             }
         }
 
-        if state != .none && self.statusNode == nil {
+        if (state != .none || displaysCover) && self.statusNode == nil {
             var image: Signal<(TransformImageArguments) -> DrawingContext?, NoError>? = nil
                         
-            if file.isMusic || file.isInstantVideo {
+            if displaysCover {
+                var title: String?
+                var performer: String?
+                for attribute in file.attributes {
+                    if case let .Audio(_, _, titleValue, performerValue, _) = attribute {
+                        title = titleValue
+                        performer = performerValue
+                        break
+                    }
+                }
+                let fileReference: FileMediaReference = .message(message: MessageReference(message), media: file)
+                // The Music row's cover: no dimming, and the player's placeholder note at 20 pt when the track has no art.
+                image = playerAlbumArt(engine: context.engine, fileReference: fileReference, albumArt: .init(thumbnailResource: ExternalMusicAlbumArtResource(file: fileReference, title: title ?? "", performer: performer ?? "", isThumbnail: true), fullSizeResource: ExternalMusicAlbumArtResource(file: fileReference, title: title ?? "", performer: performer ?? "", isThumbnail: false)), thumbnail: true, placeholderIconSize: 20.0, attemptSynchronously: !animated)
+            } else if file.isMusic || file.isInstantVideo {
                 if file.fileName?.lowercased().hasSuffix(".ogg") == true {
                 } else {
                     var title: String?
@@ -1876,8 +1974,24 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
             streamingStatusNode.backgroundNodeColor = backgroundNodeColor
         }
         
+        if displaysCover, let playingIndicator, let statusNode = self.statusNode {
+            let indicatorNode: ListMessagePlayingIndicatorNode
+            if let current = self.playingIndicatorNode {
+                indicatorNode = current
+            } else {
+                indicatorNode = ListMessagePlayingIndicatorNode()
+                self.playingIndicatorNode = indicatorNode
+                self.statusContainerNode.contentNode.insertSubnode(indicatorNode, aboveSubnode: statusNode)
+            }
+            indicatorNode.frame = CGRect(origin: CGPoint(), size: progressFrame.size)
+            indicatorNode.update(size: progressFrame.size, state: playingIndicator)
+        } else if let indicatorNode = self.playingIndicatorNode {
+            self.playingIndicatorNode = nil
+            indicatorNode.removeFromSupernode()
+        }
+        
         if let statusNode = self.statusNode {
-            if state == .none {
+            if state == .none && !displaysCover {
                 self.statusNode = nil
                 if animated {
                     statusNode.layer.animateScale(from: 1.0, to: 0.1, duration: 0.2, removeOnCompletion: false)
@@ -1885,7 +1999,7 @@ public final class ChatMessageInteractiveFileNode: ASDisplayNode {
                 }
             }
             statusNode.transitionToState(state, animated: animated, synchronous: presentationData.theme.theme.preview, completion: { [weak statusNode] in
-                if state == .none {
+                if state == .none && !displaysCover {
                     statusNode?.removeFromSupernode()
                 }
             })

@@ -568,6 +568,7 @@ final class MusicAddTracksButtonItem: ListViewItem, ItemListItem {
 
     let theme: PresentationTheme
     let title: String
+    let sideInset: CGFloat
     let topInset: CGFloat
     let bottomInset: CGFloat
     let sectionId: ItemListSectionId
@@ -575,9 +576,10 @@ final class MusicAddTracksButtonItem: ListViewItem, ItemListItem {
 
     let selectable: Bool = false
 
-    init(theme: PresentationTheme, title: String, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping () -> Void) {
+    init(theme: PresentationTheme, title: String, sideInset: CGFloat = 0.0, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping () -> Void) {
         self.theme = theme
         self.title = title
+        self.sideInset = sideInset
         self.topInset = topInset
         self.bottomInset = bottomInset
         self.sectionId = sectionId
@@ -628,7 +630,7 @@ final class MusicAddTracksButtonItemNode: ListViewItemNode {
                     return
                 }
                 strongSelf.item = item
-                let sideInset: CGFloat = 0.0
+                let sideInset = item.sideInset
                 let buttonSize = CGSize(width: params.width - params.leftInset - params.rightInset - sideInset * 2.0, height: MusicAddTracksButtonItem.height)
                 let accent = item.theme.list.itemCheckColors.fillColor
                 let foreground = item.theme.list.itemCheckColors.foregroundColor
@@ -779,7 +781,7 @@ final class MusicGlassSwitchItemNode: ListViewItemNode {
                 strongSelf.titleNode.frame = CGRect(origin: CGPoint(x: 16.0, y: floor((size.height - titleSize.height) / 2.0)), size: titleSize)
 
                 strongSelf.accessibilityLabel = item.title
-                strongSelf.accessibilityValue = item.value ? musicString(item.presentationData.strings, ru: "Вкл.", en: "On") : musicString(item.presentationData.strings, ru: "Выкл.", en: "Off")
+                strongSelf.accessibilityValue = item.value ? item.presentationData.strings.Music_On : item.presentationData.strings.Music_Off
             })
         }
     }

@@ -3,6 +3,7 @@ import SwiftSignalKit
 import AccountContext
 import TelegramCore
 import TelegramUIPreferences
+import TelegramPresentationData
 import PeerMessagesMediaPlaylist
 import LegacyMediaPickerUI
 import ICloudResources
@@ -159,6 +160,29 @@ private struct MusicStoredPlaylists: Codable {
     let playlists: [Playlist]
 }
 
+/// When each track and playlist was put in the profile, newest wins the profile's music row. Kept on this device:
+/// the profile's saved-music list has no dates, and playlists have no server side at all.
+private struct MusicStoredProfileDates: Codable {
+    struct Track: Codable {
+        let fileId: Int64
+        let timestamp: Int32
+    }
+    struct Playlist: Codable {
+        /// Int32: the item cache's encoder has no plain Int.
+        let id: Int32
+        let timestamp: Int32
+    }
+    let tracks: [Track]
+    let playlists: [Playlist]
+}
+
+/// What the profile shows in its music row: the last track put in the profile, or the last playlist when it has
+/// no tracks. Nil while nothing is there; the row then reads «Медиатека».
+public struct MusicProfileSummary: Equatable {
+    public let title: String
+    public let subtitle: String?
+}
+
 /// Title, artist and cover changed on the track edit screen, by file id. Kept on this device: the API cannot
 /// change a saved file's metadata.
 private struct MusicStoredTrackEdits: Codable {
@@ -188,6 +212,8 @@ private enum MusicCacheKey: Int32 {
     case trackEdits = 5
     case addedFiles = 6
     case recentSearches = 7
+    case sources = 8
+    case profileDates = 9
 
     var buffer: EngineDataBuffer {
         let key = EngineDataBuffer(length: 4)
@@ -209,6 +235,32 @@ func setMusicTabIsShown(context: AccountContext, _ isShown: Bool) {
     let _ = context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.tabSettings.buffer, item: MusicTabSettings(isShown: isShown)).startStandalone()
 }
 
+/// The chats whose audio files enter Music. The profile's music and files added by hand are listed whatever is chosen.
+/// Kept on this device: the API has no such setting.
+struct MusicSourceSettings: Codable, Equatable {
+    /// False: only `peerIds`.
+    var allChats: Bool
+    var peerIds: [Int64]
+
+    static let `default` = MusicSourceSettings(allChats: true, peerIds: [])
+
+    var chosenPeerIds: [EnginePeer.Id] {
+        return self.peerIds.map { EnginePeer.Id($0) }
+    }
+}
+
+func musicSourceSettings(context: AccountContext) -> Signal<MusicSourceSettings, NoError> {
+    return context.engine.data.subscribe(TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.sources.buffer))
+    |> map { entry -> MusicSourceSettings in
+        return entry?.get(MusicSourceSettings.self) ?? .default
+    }
+    |> distinctUntilChanged
+}
+
+func setMusicSourceSettings(context: AccountContext, _ settings: MusicSourceSettings) {
+    let _ = context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.sources.buffer, item: settings).startStandalone()
+}
+
 /// The account's music: the tracks saved to its profile and the audio files of all its chats.
 /// Both are real server data; a track found in several places is listed once, saved first.
 /// Sorting and artists need the whole list, so every page is loaded up front.
@@ -217,7 +269,9 @@ final class MusicLibrary {
     private let context: AccountContext
     private let savedMusicContext: ProfileSavedMusicContext
 
-    private var savedMessages: [EngineRawMessage] = []
+    private var savedMessages: [EngineRawMessage] = [] {
+        didSet { self.cachedAllTracks = nil }
+    }
     private var savedCanLoadMore = false
     private var didReceiveSavedIds = false
     /// While the profile's list reloads, its earlier pages stay listed, so no track blinks out of Music.
@@ -225,7 +279,11 @@ final class MusicLibrary {
     /// Each file's row id as last listed: when a track changes source (a chat's track saved to the profile),
     /// playlists follow it to the new id.
     private var messageIdByFileId: [Int64: EngineMessage.Id] = [:]
-    private var chatMessages: [EngineRawMessage] = []
+    /// Every row's file as ever listed, so a playlist keeps a track its source no longer lists.
+    private var listedFileIdByMessageId: [EngineMessage.Id: MusicStoredPlaylists.FileId] = [:]
+    private var chatMessages: [EngineRawMessage] = [] {
+        didSet { self.cachedAllTracks = nil }
+    }
     private var chatSearchState: SearchMessagesState?
     private var chatCanLoadMore = true
     /// True once every page of chat music has arrived, so later changes come from the user.
@@ -238,8 +296,15 @@ final class MusicLibrary {
     private let savedIdsDisposable = MetaDisposable()
     private let chatLoadDisposable = MetaDisposable()
     private let chatRefreshDisposable = MetaDisposable()
-    private let uploadDisposable = MetaDisposable()
+    /// One entry per upload: adding a second track while the first uploads must not cancel it.
+    private let uploadDisposables = DisposableSet()
     private let fileListsDisposable = MetaDisposable()
+    private let sourcesDisposable = MetaDisposable()
+    private let removeAllDisposable = MetaDisposable()
+    /// The chats music is taken from; nil for all of them.
+    private var sourcePeerIds: Set<EnginePeer.Id>? {
+        didSet { self.cachedAllTracks = nil }
+    }
 
     /// Fires on the main queue whenever `allTracks` may have changed.
     let updated = ValuePipe<Void>()
@@ -247,7 +312,9 @@ final class MusicLibrary {
     private(set) var playlists: [MusicPlaylist]
     private var favoriteFileIds = Set<Int64>()
     /// Chat files taken out of the music. Saved tracks are removed from the profile instead.
-    private var removedFileIds = Set<Int64>()
+    private var removedFileIds = Set<Int64>() {
+        didSet { self.cachedAllTracks = nil }
+    }
     /// Stored tracks of each playlist that are not in the loaded music yet: the chat audio arrives page by page.
     private var pendingPlaylistFileIds: [Int: [MusicStoredPlaylists.FileId]] = [:]
     private var didLoadPlaylists = false
@@ -269,6 +336,10 @@ final class MusicLibrary {
     private var queueTitle: String = ""
     private var queueKind: MusicPlayerQueueKind = .tracks
     private var queueIsReversed = false
+    /// Shuffle mixed the queue itself, so the list shows the play order and can still be reordered.
+    private var queueIsShuffled = false
+    /// The order before Shuffle, restored when it is turned off, and whether it was reversed and set by hand then.
+    private var queueOrderBeforeShuffle: (ids: [EngineMessage.Id], isReversed: Bool, isCustomized: Bool)?
     /// The list the queue was started from, as it stands now; nil for a shuffled start or a screen that is gone.
     private var queueSource: (() -> [MusicTrack]?)?
     /// Play Next, Add to Queue or a drag changed the order: the source list no longer decides it.
@@ -286,22 +357,77 @@ final class MusicLibrary {
             return library
         }
         let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
-        let library = MusicLibrary(context: context, playlistTitle: musicString(strings, ru: "Плейлист", en: "Playlist"))
+        let library = MusicLibrary(context: context, playlistTitle: strings.Music_Playlist)
         MusicLibrary.sharedLibraries[context.account.id] = library
+        if MusicLibrary.accountsDisposable == nil {
+            // A logged-out account's library would keep its context and keep loading: drop it with the account.
+            MusicLibrary.accountsDisposable = (context.sharedContext.activeAccountContexts
+            |> deliverOnMainQueue).startStrict(next: { accounts in
+                let activeIds = Set(accounts.accounts.map(\.0))
+                for accountId in MusicLibrary.sharedLibraries.keys where !activeIds.contains(accountId) {
+                    MusicLibrary.sharedLibraries[accountId] = nil
+                    let _ = MusicLibrary.fileIdsSnapshot.modify { current in
+                        var current = current
+                        current[accountId] = nil
+                        return current
+                    }
+                }
+            })
+        }
         return library
     }
+    private static var accountsDisposable: Disposable?
 
-    private var trackEdits: [Int64: MusicTrackEdit] = [:]
+    /// When a file or a playlist went into the profile (see `MusicStoredProfileDates`).
+    private var trackProfileDates: [Int64: Int32] = [:]
+    private var playlistProfileDates: [Int: Int32] = [:]
+    private var didLoadProfileDates = false
+    private let profileDatesDisposable = MetaDisposable()
+
+    private var trackEdits: [Int64: MusicTrackEdit] = [:] {
+        didSet { self.cachedAllTracks = nil }
+    }
     private var didLoadTrackEdits = false
 
     /// A file a chat carries is listed as that chat's message, whether or not it is also in the profile: adding a
     /// chat's track to the profile then changes neither its row nor its date, and the track stays where it was.
     /// Profile-only and device-only files share one local row id, so they too keep their row across the profile.
+    /// `allTracks` as last built, with each file's track: rebuilding the list rewrites every message (edits,
+    /// listed dates), and it is read many times per update (player state, queue sync, playlists, every screen).
+    private var cachedAllTracks: (tracks: [MusicTrack], byFileId: [Int64: MusicTrack])?
+
     var allTracks: [MusicTrack] {
+        return self.allTracksCache().tracks
+    }
+
+    private func allTracksCache() -> (tracks: [MusicTrack], byFileId: [Int64: MusicTrack]) {
+        if let cached = self.cachedAllTracks {
+            return cached
+        }
+        let tracks = self.buildAllTracks()
+        var byFileId: [Int64: MusicTrack] = [:]
+        for track in tracks {
+            if let fileId = track.file?.fileId.id, byFileId[fileId] == nil {
+                byFileId[fileId] = track
+            }
+        }
+        let cached = (tracks: tracks, byFileId: byFileId)
+        self.cachedAllTracks = cached
+        return cached
+    }
+
+    private func buildAllTracks() -> [MusicTrack] {
+        var addedTimestamps: [Int64: Int32] = [:]
+        for added in self.addedFiles {
+            addedTimestamps[added.file.fileId.id] = added.timestamp
+        }
         let profileFileIds = self.savedFileIds ?? Set(self.savedMessages.compactMap { musicFileId($0)?.id })
         var fileIds = Set<Int64>()
         var tracks: [MusicTrack] = []
         for message in self.chatMessages {
+            if let sourcePeerIds = self.sourcePeerIds, !sourcePeerIds.contains(message.id.peerId) {
+                continue
+            }
             guard let fileId = musicFileId(message)?.id, !self.removedFileIds.contains(fileId), fileIds.insert(fileId).inserted else {
                 continue
             }
@@ -315,7 +441,8 @@ final class MusicLibrary {
             guard !self.removedFileIds.contains(fileId), fileIds.insert(fileId).inserted else {
                 continue
             }
-            tracks.append(MusicTrack(message: self.applyingEdit(self.withListedDate(message, fileId: fileId)), isSaved: true))
+            let listed = message.timestamp == 0 ? addedTimestamps[fileId].flatMap { message.withUpdatedTimestamp($0) } ?? message : message
+            tracks.append(MusicTrack(message: self.applyingEdit(listed), isSaved: true))
         }
         for file in self.addedFiles where !self.removedFileIds.contains(file.file.fileId.id) && fileIds.insert(file.file.fileId.id).inserted {
             tracks.append(MusicTrack(message: self.applyingEdit(self.addedFileMessage(file)), isSaved: profileFileIds.contains(file.file.fileId.id)))
@@ -325,18 +452,13 @@ final class MusicLibrary {
 
     /// The profile's list has no dates; a file also kept on this device lists with the date it was added there,
     /// so it keeps its place when sorted by date.
-    private func withListedDate(_ message: EngineRawMessage, fileId: Int64) -> EngineRawMessage {
-        guard message.timestamp == 0, let added = self.addedFiles.first(where: { $0.file.fileId.id == fileId }) else {
-            return message
-        }
-        return message.withUpdatedTimestamp(added.timestamp)
-    }
-
     private struct AddedFile {
         let file: TelegramMediaFile
         let timestamp: Int32
     }
-    private var addedFiles: [AddedFile] = []
+    private var addedFiles: [AddedFile] = [] {
+        didSet { self.cachedAllTracks = nil }
+    }
     private var didLoadAddedFiles = false
 
     /// An added file is listed as a local message of the account, like saved music (same id scheme; a file is
@@ -515,6 +637,8 @@ final class MusicLibrary {
                 // A track taken off the profile elsewhere (the player) stays in Music.
                 if let previous = self.savedFileIds {
                     self.keepInMusic(fileIds: previous.subtracting(ids))
+                    // Saved elsewhere (the player, another device): put in the profile now, as far as this device knows.
+                    self.stampProfileDates(fileIds: ids.subtracting(previous))
                 }
                 self.savedFileIds = ids
                 self.notifyUpdated()
@@ -529,6 +653,18 @@ final class MusicLibrary {
         }))
 
         self.loadMoreChatMusic()
+
+        self.sourcesDisposable.set((musicSourceSettings(context: context)
+        |> deliverOnMainQueue).start(next: { [weak self] settings in
+            guard let self else {
+                return
+            }
+            let sourcePeerIds: Set<EnginePeer.Id>? = settings.allChats ? nil : Set(settings.chosenPeerIds)
+            if sourcePeerIds != self.sourcePeerIds {
+                self.sourcePeerIds = sourcePeerIds
+                self.notifyUpdated()
+            }
+        }))
 
         self.fileListsDisposable.set((context.engine.data.get(
             TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.favorites.buffer),
@@ -606,6 +742,31 @@ final class MusicLibrary {
             self.notifyUpdated()
         }))
 
+        self.profileDatesDisposable.set((context.engine.data.get(
+            TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.profileDates.buffer)
+        )
+        |> deliverOnMainQueue).start(next: { [weak self] entry in
+            guard let self else {
+                return
+            }
+            let stored = entry?.get(MusicStoredProfileDates.self)
+            let tracksMeanwhile = self.trackProfileDates
+            let playlistsMeanwhile = self.playlistProfileDates
+            for track in stored?.tracks ?? [] {
+                self.trackProfileDates[track.fileId] = track.timestamp
+            }
+            for playlist in stored?.playlists ?? [] {
+                self.playlistProfileDates[Int(playlist.id)] = playlist.timestamp
+            }
+            self.trackProfileDates.merge(tracksMeanwhile, uniquingKeysWith: { _, new in new })
+            self.playlistProfileDates.merge(playlistsMeanwhile, uniquingKeysWith: { _, new in new })
+            self.didLoadProfileDates = true
+            if !tracksMeanwhile.isEmpty || !playlistsMeanwhile.isEmpty {
+                self.storeProfileDates()
+            }
+            self.notifyUpdated()
+        }))
+
         self.playlistsDisposable.set((context.engine.data.get(
             TelegramEngine.EngineData.Item.ItemCache.Item(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.playlists.buffer)
         )
@@ -679,8 +840,9 @@ final class MusicLibrary {
     private func followMovedTracks() {
         var current: [Int64: EngineMessage.Id] = [:]
         for track in self.allTracks {
-            if let fileId = track.file?.fileId.id, current[fileId] == nil {
-                current[fileId] = track.message.id
+            if let fileId = musicFileId(track.message), current[fileId.id] == nil {
+                current[fileId.id] = track.message.id
+                self.listedFileIdByMessageId[track.message.id] = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
             }
         }
         var moved: [EngineMessage.Id: EngineMessage.Id] = [:]
@@ -736,6 +898,10 @@ final class MusicLibrary {
                 fileIds[track.message.id] = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
             }
         }
+        // A track not listed now (its chat left out of the sources) keeps its file, so the playlist does not lose it.
+        for (messageId, fileId) in self.listedFileIdByMessageId where fileIds[messageId] == nil {
+            fileIds[messageId] = fileId
+        }
         let stored = MusicStoredPlaylists(playlists: self.playlists.map { playlist in
             var playlistFileIds = playlist.trackIds.compactMap { fileIds[$0] }
             // Stored tracks the music has not loaded yet stay in the playlist.
@@ -757,11 +923,14 @@ final class MusicLibrary {
         self.savedIdsDisposable.dispose()
         self.chatLoadDisposable.dispose()
         self.chatRefreshDisposable.dispose()
-        self.uploadDisposable.dispose()
+        self.uploadDisposables.dispose()
         self.fileListsDisposable.dispose()
+        self.sourcesDisposable.dispose()
+        self.removeAllDisposable.dispose()
         self.recentSearchesDisposable.dispose()
         self.playlistsDisposable.dispose()
         self.trackEditsDisposable.dispose()
+        self.profileDatesDisposable.dispose()
     }
 
     // MARK: Playlists
@@ -915,9 +1084,53 @@ final class MusicLibrary {
         self.notifyUpdated()
     }
 
+    /// Empties Music: every track is taken out (the profile and the chats keep their files) and the playlists go.
+    /// Chat audio still loading is taken out once it has arrived; files that come later enter Music as usual.
+    func removeAll() {
+        let apply: () -> Void = { [weak self] in
+            guard let self else {
+                return
+            }
+            let tracks = self.allTracks
+            // Chats left out of the sources too: choosing them again later must not bring the music back.
+            let hiddenFileIds = Set(self.chatMessages.compactMap { musicFileId($0)?.id }).subtracting(self.removedFileIds)
+            if !hiddenFileIds.isEmpty {
+                self.removedFileIds.formUnion(hiddenFileIds)
+                self.storeFileIds(self.removedFileIds, key: .removed)
+            }
+            if !tracks.isEmpty {
+                self.remove(tracks: tracks)
+            } else if !hiddenFileIds.isEmpty {
+                self.notifyUpdated()
+            }
+            if !self.playlists.isEmpty {
+                for playlist in self.playlists {
+                    self.pendingPlaylistFileIds[playlist.id] = nil
+                }
+                self.playlists = []
+                self.storePlaylists()
+                self.notifyUpdated()
+            }
+        }
+        apply()
+        if self.isFullyLoaded {
+            self.removeAllDisposable.set(nil)
+            return
+        }
+        self.removeAllDisposable.set(self.updated.signal().start(next: { [weak self] _ in
+            guard let self, self.isFullyLoaded else {
+                return
+            }
+            self.removeAllDisposable.set(nil)
+            apply()
+        }))
+    }
+
     /// The profile's files, as the account's saved-music ids report them. The player saves through other contexts;
     /// these ids are what every menu reads, so the player's change shows here at once.
-    private(set) var savedFileIds: Set<Int64>?
+    private(set) var savedFileIds: Set<Int64>? {
+        didSet { self.cachedAllTracks = nil }
+    }
 
     func isSavedToProfile(_ track: MusicTrack) -> Bool {
         guard let fileId = track.file?.fileId.id, let savedFileIds = self.savedFileIds else {
@@ -942,12 +1155,121 @@ final class MusicLibrary {
         // The profile's list is updated at once, so the track keeps its place in Music.
         let reference: FileMediaReference = track.message.id.namespace == Namespaces.Message.Local ? .standalone(media: file) : .message(message: MessageReference(track.message), media: file)
         if isSaved {
+            self.stampProfileDates(fileIds: [file.fileId.id])
             let _ = self.savedMusicContext.addMusic(file: reference).startStandalone()
         } else {
             self.keepInMusic(fileIds: [file.fileId.id])
             let _ = self.savedMusicContext.removeMusic(file: .standalone(media: file)).startStandalone()
         }
         self.notifyUpdated()
+    }
+
+    // MARK: Profile
+    // The profile's music: its saved tracks (server) and the playlists put there (local stand-ins).
+
+    private func stampProfileDates(fileIds: Set<Int64>) {
+        guard !fileIds.isEmpty else {
+            return
+        }
+        let now = Int32(Date().timeIntervalSince1970)
+        for fileId in fileIds {
+            self.trackProfileDates[fileId] = now
+        }
+        self.storeProfileDates()
+    }
+
+    private func storeProfileDates() {
+        guard self.didLoadProfileDates else {
+            return
+        }
+        let item = MusicStoredProfileDates(
+            tracks: self.trackProfileDates.map { MusicStoredProfileDates.Track(fileId: $0.key, timestamp: $0.value) },
+            playlists: self.playlistProfileDates.map { MusicStoredProfileDates.Playlist(id: Int32(clamping: $0.key), timestamp: $0.value) }
+        )
+        let _ = self.context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.profileDates.buffer, item: item).startStandalone()
+    }
+
+    /// The profile's tracks, last put there first. A track also in Music is its Music row, so menus and favorites
+    /// work on it; a track taken out of Music stays in the profile as the profile lists it.
+    var profileTracks: [MusicTrack] {
+        let byFileId = self.allTracksCache().byFileId
+        var fileIds = Set<Int64>()
+        var tracks: [(track: MusicTrack, date: Int32)] = []
+        for message in self.savedMessages {
+            guard let fileId = musicFileId(message)?.id, fileIds.insert(fileId).inserted else {
+                continue
+            }
+            if let savedFileIds = self.savedFileIds, !savedFileIds.contains(fileId) {
+                continue
+            }
+            let track = byFileId[fileId] ?? MusicTrack(message: self.applyingEdit(message), isSaved: true)
+            tracks.append((track, self.trackProfileDates[fileId] ?? 0))
+        }
+        // The profile lists its newest first already; a date known here only moves tracks put in from this device.
+        return tracks.enumerated().sorted { lhs, rhs in
+            if lhs.element.date != rhs.element.date {
+                return lhs.element.date > rhs.element.date
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element.track)
+    }
+
+    /// Playlists put in the profile, last put there first.
+    var profilePlaylists: [MusicPlaylist] {
+        return self.playlists.filter(\.isInProfile).sorted { lhs, rhs in
+            let lhsDate = self.playlistProfileDates[lhs.id] ?? 0
+            let rhsDate = self.playlistProfileDates[rhs.id] ?? 0
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            return lhs.dateAdded > rhs.dateAdded
+        }
+    }
+
+    var hasProfileMusic: Bool {
+        return !self.profileTracks.isEmpty || !self.profilePlaylists.isEmpty
+    }
+
+    func setPlaylistInProfile(id: Int, _ isInProfile: Bool) {
+        if isInProfile {
+            self.playlistProfileDates[id] = Int32(Date().timeIntervalSince1970)
+        } else {
+            self.playlistProfileDates[id] = nil
+        }
+        self.storeProfileDates()
+        self.updatePlaylist(id: id, { playlist in
+            playlist.isInProfile = isInProfile
+        })
+    }
+
+    /// The local test user's profile music (concept only): the five newest tracks of this library and one of its
+    /// playlists, so another user's profile can be shown with music in it.
+    func testProfileContent() -> (tracks: [MusicTrack], playlists: [MusicPlaylist]) {
+        let tracks = Array(self.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false)).prefix(5))
+        let playlists = self.playlists(sorting: MusicSorting(key: .dateAdded, ascending: false))
+        let playlist = playlists.first(where: { !self.tracks(of: $0).isEmpty }) ?? playlists.first
+        return (tracks, playlist.flatMap { [$0] } ?? [])
+    }
+
+    func testProfileSummary(strings: PresentationStrings) -> MusicProfileSummary? {
+        let content = self.testProfileContent()
+        if let track = content.tracks.first {
+            return MusicProfileSummary(title: track.title, subtitle: track.artist ?? strings.MediaPlayer_UnknownArtist)
+        }
+        if let playlist = content.playlists.first {
+            return MusicProfileSummary(title: playlist.title, subtitle: musicTrackCountString(strings, self.tracks(of: playlist).count))
+        }
+        return nil
+    }
+
+    func profileSummary(strings: PresentationStrings) -> MusicProfileSummary? {
+        if let track = self.profileTracks.first {
+            return MusicProfileSummary(title: track.title, subtitle: track.artist ?? strings.MediaPlayer_UnknownArtist)
+        }
+        if let playlist = self.profilePlaylists.first {
+            return MusicProfileSummary(title: playlist.title, subtitle: musicTrackCountString(strings, self.tracks(of: playlist).count))
+        }
+        return nil
     }
 
     private func storeFileIds(_ fileIds: Set<Int64>, key: MusicCacheKey) {
@@ -1055,7 +1377,9 @@ final class MusicLibrary {
         if coverData != nil {
             file = file.withUpdatedPreviewRepresentations([])
         }
-        self.uploadDisposable.set((standaloneUploadedFile(
+        let uploadDisposable = MetaDisposable()
+        self.uploadDisposables.add(uploadDisposable)
+        uploadDisposable.set((standaloneUploadedFile(
             postbox: context.account.postbox,
             network: context.account.network,
             peerId: context.account.peerId,
@@ -1071,13 +1395,16 @@ final class MusicLibrary {
                 return
             }
             context.engine.resources.moveResourceData(from: EngineMediaResource.Id(file.resource.id), to: EngineMediaResource.Id(resultFile.resource.id), synchronous: true)
-            self.uploadDisposable.set((context.engine.peers.addSavedMusic(file: .standalone(media: resultFile))
-            |> deliverOnMainQueue).start(error: { _ in
+            uploadDisposable.set((context.engine.peers.addSavedMusic(file: .standalone(media: resultFile))
+            |> deliverOnMainQueue).start(error: { [weak self] _ in
+                self?.uploadDisposables.remove(uploadDisposable)
                 completion(false)
-            }, completed: {
+            }, completed: { [weak self] in
+                self?.uploadDisposables.remove(uploadDisposable)
                 completion(true)
             }))
-        }, error: { _ in
+        }, error: { [weak self] _ in
+            self?.uploadDisposables.remove(uploadDisposable)
             completion(false)
         }))
     }
@@ -1089,12 +1416,14 @@ final class MusicLibrary {
         self.queueTitle = title
         self.queueKind = kind
         self.queueIsReversed = false
+        self.queueIsShuffled = false
+        self.queueOrderBeforeShuffle = nil
         self.queueSource = source
         self.queueIsCustomized = false
         self.playingMessageId = track.message.id
         self.watchPlayingTrack()
         self.queuePromise.set(.single(self.queue))
-        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: self.queue.map(\.id), title: title, kind: kind, isReversed: false))
+        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: self.queue.map(\.id), title: title, kind: kind, isReversed: false, isShuffled: false))
         return self.queueLocation(at: track.message.id)
     }
 
@@ -1121,7 +1450,47 @@ final class MusicLibrary {
         self.queueIsReversed = isReversed
         self.queue.reverse()
         self.queuePromise.set(.single(self.queue))
-        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: self.queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: isReversed))
+        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: self.queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: isReversed, isShuffled: self.queueIsShuffled))
+    }
+
+    /// Shuffle mixes the queue in place, Apple Music style: the playing track comes first and the rest follow in a
+    /// random order, which the queue list shows and lets the user drag. Turning it off brings the order back from
+    /// before Shuffle, the playing track where it was; tracks that joined meanwhile keep their order at the end.
+    func setQueueShuffled(_ isShuffled: Bool) {
+        guard self.queueIsShuffled != isShuffled, !self.queue.isEmpty else {
+            return
+        }
+        var queue = self.queue
+        if isShuffled {
+            self.queueOrderBeforeShuffle = (queue.map(\.id), self.queueIsReversed, self.queueIsCustomized)
+            var rest = queue
+            var head: [EngineRawMessage] = []
+            if let playingId = self.playingMessageId, let index = rest.firstIndex(where: { $0.id == playingId }) {
+                head.append(rest.remove(at: index))
+            }
+            rest.shuffle()
+            queue = head + rest
+        } else {
+            if let before = self.queueOrderBeforeShuffle {
+                var ids = before.ids
+                if before.isReversed != self.queueIsReversed {
+                    ids.reverse()
+                }
+                var position: [EngineMessage.Id: Int] = [:]
+                for (index, id) in ids.enumerated() {
+                    position[id] = index
+                }
+                let known = queue.filter { position[$0.id] != nil }.sorted(by: { position[$0.id]! < position[$1.id]! })
+                let added = queue.filter { position[$0.id] == nil }
+                queue = known + added
+                self.queueIsCustomized = before.isCustomized || !added.isEmpty
+            }
+            self.queueOrderBeforeShuffle = nil
+        }
+        self.queueIsShuffled = isShuffled
+        self.queue = queue
+        self.queuePromise.set(.single(queue))
+        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed, isShuffled: isShuffled))
     }
 
     /// Moves a track of the queue to another place, as the player sheet's list is reordered.
@@ -1138,7 +1507,7 @@ final class MusicLibrary {
         self.queueIsCustomized = true
         self.queue = queue
         self.queuePromise.set(.single(queue))
-        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed))
+        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed, isShuffled: self.queueIsShuffled))
     }
 
     /// Puts the tracks right after the playing one, or at the end of the queue, in their order.
@@ -1164,13 +1533,21 @@ final class MusicLibrary {
             self.queueIsCustomized = true
             self.queue = queue
             self.queuePromise.set(.single(queue))
-            self.queueInfo.set(MusicPlayerQueueInfo(messageIds: queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed))
+            self.queueInfo.set(MusicPlayerQueueInfo(messageIds: queue.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed, isShuffled: self.queueIsShuffled))
             completion(true)
         })
     }
 
     private func chatMusicSearch(state: SearchMessagesState?) -> Signal<(SearchMessagesResult, SearchMessagesState), NoError> {
+        // The local test chat is a place to look at tracks in bubbles, not a source of Music.
         return self.context.engine.messages.searchMessages(location: .general(scope: .everywhere, groupId: nil, tags: [.music], minDate: nil, maxDate: nil, folderId: nil, communityId: nil), query: "", state: state)
+        |> map { result, state -> (SearchMessagesResult, SearchMessagesState) in
+            let messages = result.messages.filter { $0.id.peerId != musicTestChatPeerId }
+            if messages.count == result.messages.count {
+                return (result, state)
+            }
+            return (SearchMessagesResult(messages: messages, readStates: result.readStates, threadInfo: result.threadInfo, totalCount: result.totalCount - Int32(result.messages.count - messages.count), completed: result.completed), state)
+        }
     }
 
     /// The favorite files, now and after every change.
@@ -1202,7 +1579,7 @@ final class MusicLibrary {
                 guard let self else {
                     return MusicPlayerLibraryState(favoriteFileIds: [], removedFileIds: [], trackFileIds: [])
                 }
-                return MusicPlayerLibraryState(favoriteFileIds: self.favoriteFileIds, removedFileIds: self.removedFileIds, trackFileIds: Set(self.allTracks.compactMap { $0.file?.fileId.id }))
+                return MusicPlayerLibraryState(favoriteFileIds: self.favoriteFileIds, removedFileIds: self.removedFileIds, trackFileIds: Set(self.allTracksCache().byFileId.keys))
             }
             subscriber.putNext(state())
             return self.updated.signal().start(next: { _ in
@@ -1213,14 +1590,43 @@ final class MusicLibrary {
         |> distinctUntilChanged
     }
 
+    /// Files in Music per account, as last published: chat bubbles read it while laying out, off the main queue.
+    private static let fileIdsSnapshot = Atomic<[AccountRecordId: Set<Int64>]>(value: [:])
+
+    /// The same set for every subscriber: chat bubbles each watch it, so it is built once per change, not per bubble.
+    private let fileIdsValue = ValuePromise<Set<Int64>>(Set(), ignoreRepeated: true)
+
+    private func publishFileIds() {
+        let fileIds = Set(self.allTracksCache().byFileId.keys)
+        self.fileIdsValue.set(fileIds)
+        let accountId = self.context.account.id
+        let _ = MusicLibrary.fileIdsSnapshot.modify { current in
+            var current = current
+            current[accountId] = fileIds
+            return current
+        }
+    }
+
+    /// Whether the file is in Music, from any queue. False until the library has been created.
+    static func containsFile(accountId: AccountRecordId, fileId: Int64) -> Bool {
+        return MusicLibrary.fileIdsSnapshot.with { $0[accountId]?.contains(fileId) ?? false }
+    }
+
+    /// The files in Music, now and after every change.
+    var fileIdsSignal: Signal<Set<Int64>, NoError> {
+        self.publishFileIds()
+        return self.fileIdsValue.get()
+    }
+
     /// The loaded track that holds this file.
     func track(fileId: Int64) -> MusicTrack? {
-        return self.allTracks.first(where: { $0.file?.fileId.id == fileId })
+        return self.allTracksCache().byFileId[fileId]
     }
 
     private func notifyUpdated() {
         self.followMovedTracks()
         self.resolvePlaylistTracks()
+        self.publishFileIds()
         self.updated.putNext(Void())
         // After the screens: the list the queue came from has just been rebuilt by them.
         self.syncQueueWithLibrary()
@@ -1283,7 +1689,7 @@ final class MusicLibrary {
 
         var updated: [EngineRawMessage]
         let source = self.queueSource?().flatMap { $0.isEmpty ? nil : $0 }
-        if let source, !self.queueIsCustomized {
+        if let source, !self.queueIsCustomized, !self.queueIsShuffled {
             updated = source.map { resolve($0.message) }
             if self.queueIsReversed {
                 updated.reverse()
@@ -1317,7 +1723,7 @@ final class MusicLibrary {
         }
         self.queue = updated
         self.queuePromise.set(.single(updated))
-        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: updated.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed))
+        self.queueInfo.set(MusicPlayerQueueInfo(messageIds: updated.map(\.id), title: self.queueTitle, kind: self.queueKind, isReversed: self.queueIsReversed, isShuffled: self.queueIsShuffled))
     }
 }
 

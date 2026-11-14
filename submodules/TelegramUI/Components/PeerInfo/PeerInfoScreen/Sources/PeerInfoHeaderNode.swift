@@ -45,6 +45,7 @@ import PlainButtonComponent
 import BundleIconComponent
 import MarqueeComponent
 import EdgeEffect
+import MusicScreen
 
 final class PeerInfoHeaderRegularContentNode: SparseNode {
 }
@@ -198,16 +199,47 @@ final class PeerInfoHeaderNode: ASDisplayNode {
         return self.music != nil
     }
 
-    /// The track the music strip shows for `peer` and `screenData` (`peerInfoProfileMusic`): none on Settings and on the
-    /// account's own peer opened as a profile.
-    func profileMusic(peer: EnginePeer?, screenData: PeerInfoScreenData?) -> TelegramMediaFile? {
+    /// What the music strip says: a track (or playlist) title and its artist (or track count).
+    struct ProfileMusicStrip: Equatable {
+        let title: String
+        let subtitle: String?
+    }
+
+    /// The account's own profile music (Music section): the last track or playlist put in the profile, nil while there
+    /// is none. Set by the screen from `MusicProfileSupport.summary`.
+    var ownProfileMusicSummary: MusicProfileSummary?
+
+    /// The strip for `peer` and `screenData`: none on Settings and on the account's own peer opened as a profile.
+    /// The own profile (Music section on) always has it: «Медиатека» until something is put there. Another user's shows
+    /// the first track of their profile's list (`peerInfoProfileMusic`).
+    func profileMusic(peer: EnginePeer?, screenData: PeerInfoScreenData?) -> ProfileMusicStrip? {
         guard let peer, peer.id != self.context.account.peerId || self.isMyProfile, let screenData else {
             return nil
+        }
+        if isMusicSectionEnabled && MusicProfileSupport.hasLocalProfileMusic(context: self.context, peerId: peer.id) {
+            let strings = self.context.sharedContext.currentPresentationData.with { $0 }.strings
+            if let summary = self.ownProfileMusicSummary {
+                return ProfileMusicStrip(title: summary.title, subtitle: summary.subtitle)
+            }
+            return ProfileMusicStrip(title: MusicProfileSupport.libraryTitle(strings: strings), subtitle: nil)
         }
         let list = screenData.savedMusicState.map { state -> (files: [TelegramMediaFile], isLoading: Bool) in
             return (state.files, state.dataState == .loading)
         }
-        return peerInfoProfileMusic(list: list, fullUserMusic: (screenData.cachedData as? CachedUserData)?.savedMusic)
+        guard let file = peerInfoProfileMusic(list: list, fullUserMusic: (screenData.cachedData as? CachedUserData)?.savedMusic) else {
+            return nil
+        }
+        let strings = self.context.sharedContext.currentPresentationData.with { $0 }.strings
+        var artist = strings.MediaPlayer_UnknownArtist
+        var track: String?
+        for attribute in file.attributes {
+            if case let .Audio(_, _, title, performer, _) = attribute {
+                artist = performer ?? artist
+                track = title
+                break
+            }
+        }
+        return ProfileMusicStrip(title: track ?? file.fileName ?? strings.MediaPlayer_UnknownTrack, subtitle: artist)
     }
     
     var performButtonAction: ((PeerInfoHeaderButtonKey, PeerInfoHeaderButtonNode?, ContextGesture?) -> Void)?
@@ -2672,22 +2704,7 @@ final class PeerInfoHeaderNode: ASDisplayNode {
             let stripSecondaryColor = hasCoverColor ? navigationContentsSecondaryColor.mixedWith(.white, alpha: 0.45) : navigationContentsSecondaryColor
             let musicBandWidth = max(0.0, backgroundFrame.width - stripLeft - stripRight)
             if let currentSavedMusic {
-                var artist = presentationData.strings.MediaPlayer_UnknownArtist
-                var track: String?
-                for attribute in currentSavedMusic.attributes {
-                    if case let  .Audio(_, _, title, performer, _) = attribute {
-                        artist = performer ?? artist
-                        track = title
-                        break
-                    }
-                }
-                if track == nil {
-                    if let fileName = currentSavedMusic.fileName {
-                        track = fileName
-                    } else {
-                        track = presentationData.strings.MediaPlayer_UnknownTrack
-                    }
-                }
+                let track: String? = currentSavedMusic.title
 
                 let music = self.music ?? {
                     let componentView = ComponentView<Empty>()
@@ -2698,9 +2715,11 @@ final class PeerInfoHeaderNode: ASDisplayNode {
                 let musicString = NSMutableAttributedString()
                 // Keep music inside the profile band, including when a side strip is visible.
                 musicString.append(NSAttributedString(string: track ?? "", font: Font.semibold(12.0), textColor: isOverlay ? .white : presentationData.theme.list.itemAccentColor))
-                let artistSeparatorIndex = musicString.length
-                musicString.append(NSAttributedString(string: " \(artist)", font: Font.regular(12.0), textColor: stripSecondaryColor))
-                musicString.addAttribute(.kern, value: CGFloat(2.0), range: NSRange(location: artistSeparatorIndex, length: 1))
+                if let artist = currentSavedMusic.subtitle {
+                    let artistSeparatorIndex = musicString.length
+                    musicString.append(NSAttributedString(string: " \(artist)", font: Font.regular(12.0), textColor: stripSecondaryColor))
+                    musicString.addAttribute(.kern, value: CGFloat(2.0), range: NSRange(location: artistSeparatorIndex, length: 1))
+                }
 
                 let musicSize = music.update(
                     transition: .immediate,

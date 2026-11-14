@@ -25,6 +25,13 @@ public struct AttachmentMainButtonState {
         case bold
     }
     
+    /// Where the badge sits: right after the title (as before), or as a counter at the button's trailing edge, with
+    /// the title and icon moving left to make room for it.
+    public enum BadgeAlignment: Equatable {
+        case inline
+        case trailing
+    }
+
     public enum Position: String, Equatable {
         case top
         case bottom
@@ -42,6 +49,9 @@ public struct AttachmentMainButtonState {
     public let isEnabled: Bool
     public let hasShimmer: Bool
     public let iconName: String?
+    /// An SF Symbol drawn in place of `iconName`, at the title's size and weight.
+    public let iconSystemName: String?
+    public let badgeAlignment: BadgeAlignment
     public let iconCustomEmojiId: Int64?
     public let smallSpacing: Bool
     public let position: Position?
@@ -61,6 +71,8 @@ public struct AttachmentMainButtonState {
         isEnabled: Bool,
         hasShimmer: Bool,
         iconName: String? = nil,
+        iconSystemName: String? = nil,
+        badgeAlignment: BadgeAlignment = .inline,
         iconCustomEmojiId: Int64? = nil,
         smallSpacing: Bool = false,
         position: Position? = nil,
@@ -77,6 +89,8 @@ public struct AttachmentMainButtonState {
         self.isEnabled = isEnabled
         self.hasShimmer = hasShimmer
         self.iconName = iconName
+        self.iconSystemName = iconSystemName
+        self.badgeAlignment = badgeAlignment
         self.iconCustomEmojiId = iconCustomEmojiId
         self.smallSpacing = smallSpacing
         self.position = position

@@ -360,6 +360,10 @@ public final class ListMessageFileItemNode: ListMessageNode {
     private var editControlNode: HighlightableButtonNode?
     private var editControlAction: (() -> Void)?
     private var trailingIconNode: ASImageNode?
+    /// Music section concept: the double note of a track that is in Music (see `ListMessageItem.showsMusicLibraryMark`).
+    private var musicLibraryMarkNode: ASImageNode?
+    private var musicLibraryMarkFileId: Int64?
+    private let musicLibraryDisposable = MetaDisposable()
     /// How far the trailing icon moves left in the preview, besides undoing the content offset: the card's 16 pt inset.
     private static let trailingIconExtractedShift: CGFloat = 16.0
     /// Tints a selected cover row while the list selects tracks.
@@ -552,7 +556,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             transition.updateSublayerTransformOffset(layer: strongSelf.offsetContainerNode.layer, offset: CGPoint(x: isExtracted ? strongSelf.extractedContentOffset : 0.0, y: 0.0))
-            if let trailingIconNode = strongSelf.trailingIconNode {
+            for trailingIconNode in [strongSelf.trailingIconNode, strongSelf.musicLibraryMarkNode].compactMap({ $0 }) {
                 let shift: CGFloat
                 if isExtracted, case .plain = item.style {
                     shift = -(strongSelf.extractedContentOffset + ListMessageFileItemNode.trailingIconExtractedShift)
@@ -575,6 +579,7 @@ public final class ListMessageFileItemNode: ListMessageNode {
     deinit {
         self.statusDisposable.dispose()
         self.fetchDisposable.dispose()
+        self.musicLibraryDisposable.dispose()
     }
     
     required public init?(coder aDecoder: NSCoder) {
@@ -1089,7 +1094,18 @@ public final class ListMessageFileItemNode: ListMessageNode {
             }
             
             var contentRightInset = rightInset + rightOffset + reorderInset
-            if let trailingIcon = item.trailingIcon {
+            var musicLibraryMarkFileId: Int64?
+            if item.trailingIcon == nil, item.showsMusicLibraryMark, let file = selectedMedia as? TelegramMediaFile, file.isMusic, !file.isVoice {
+                musicLibraryMarkFileId = file.fileId.id
+            }
+            let musicLibraryMarkSize = CGSize(width: 14.0, height: 14.0)
+            if item.trailingIcon == nil, musicLibraryMarkFileId != nil {
+                // The same room as a trailing icon, whether or not the mark shows, so the text never jumps.
+                contentRightInset += musicLibraryMarkSize.width + 12.0 + 8.0
+                if case .plain = item.style {
+                    contentRightInset += 12.0 + ListMessageFileItemNode.trailingIconExtractedShift
+                }
+            } else if let trailingIcon = item.trailingIcon {
                 // The icon's own 12 pt margin and an 8 pt gap before the text; a plain row also keeps room for the preview,
                 // where the text moves right by the content offset and the icon left by the card's inset (see `trailingIconExtractedShift`).
                 contentRightInset += trailingIcon.size.width + 12.0 + 8.0
@@ -1346,6 +1362,41 @@ public final class ListMessageFileItemNode: ListMessageNode {
                     } else if let trailingIconNode = strongSelf.trailingIconNode {
                         strongSelf.trailingIconNode = nil
                         trailingIconNode.removeFromSupernode()
+                    }
+                    
+                    if let musicLibraryMarkFileId {
+                        let markNode: ASImageNode
+                        if let current = strongSelf.musicLibraryMarkNode {
+                            markNode = current
+                        } else {
+                            markNode = ASImageNode()
+                            markNode.displaysAsynchronously = false
+                            markNode.isUserInteractionEnabled = false
+                            strongSelf.musicLibraryMarkNode = markNode
+                            strongSelf.offsetContainerNode.addSubnode(markNode)
+                        }
+                        if updatedTheme != nil || markNode.image == nil {
+                            markNode.image = generateTintedImage(image: UIImage(bundleImageName: "Media Editor/SmallAudio"), color: item.presentationData.theme.theme.list.itemSecondaryTextColor)
+                        }
+                        let markFrame = CGRect(origin: CGPoint(x: params.width - params.rightInset - reorderInset - 12.0 - musicLibraryMarkSize.width, y: floor((nodeLayout.contentSize.height - musicLibraryMarkSize.height) / 2.0)), size: musicLibraryMarkSize)
+                        markNode.bounds = CGRect(origin: CGPoint(), size: markFrame.size)
+                        transition.updatePosition(node: markNode, position: markFrame.center)
+                        if strongSelf.musicLibraryMarkFileId != musicLibraryMarkFileId {
+                            strongSelf.musicLibraryMarkFileId = musicLibraryMarkFileId
+                            let context = item.context
+                            markNode.isHidden = !context.sharedContext.musicLibraryContainsFile(context: context, fileId: musicLibraryMarkFileId)
+                            strongSelf.musicLibraryDisposable.set((context.sharedContext.musicLibraryFileIds(context: context)
+                            |> map { $0.contains(musicLibraryMarkFileId) }
+                            |> distinctUntilChanged
+                            |> deliverOnMainQueue).startStrict(next: { [weak markNode] isInLibrary in
+                                markNode?.isHidden = !isInLibrary
+                            }))
+                        }
+                    } else if let markNode = strongSelf.musicLibraryMarkNode {
+                        strongSelf.musicLibraryMarkNode = nil
+                        strongSelf.musicLibraryMarkFileId = nil
+                        strongSelf.musicLibraryDisposable.set(nil)
+                        markNode.removeFromSupernode()
                     }
                     
                     if let reorderControlSizeAndApply = reorderControlSizeAndApply {
@@ -1952,6 +2003,27 @@ public final class ListMessageFileItemNode: ListMessageNode {
         return self.item?.header.flatMap { [$0] }
     }
     
+    override public func didLoad() {
+        super.didLoad()
+
+        let selectionTapRecognizer = AreaTapGestureRecognizer(target: self, action: #selector(self.selectionTapGesture(_:)))
+        selectionTapRecognizer.isInArea = { [weak self] point in
+            guard let self, let item = self.item, item.selectsOnControlOnly, case .selectable = item.selection, let selectionNode = self.selectionNode else {
+                return false
+            }
+            let frame = selectionNode.view.convert(selectionNode.bounds, to: self.view)
+            return point.x >= frame.minX && point.x <= frame.maxX
+        }
+        self.view.addGestureRecognizer(selectionTapRecognizer)
+    }
+
+    @objc private func selectionTapGesture(_ recognizer: UITapGestureRecognizer) {
+        guard case .ended = recognizer.state, let item = self.item, let message = item.message, case let .selectable(selected, _) = item.selection else {
+            return
+        }
+        item.interaction.toggleMessagesSelection([message.id], !selected)
+    }
+
     override public func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let item = self.item, case .selectable = item.selection {
             if !self.iconButtonNode.isHidden && self.iconButtonNode.frame.contains(point) {
@@ -2196,6 +2268,19 @@ private final class DownloadIconNode: ASImageNode {
                     case .download:
                         break
                 }
+        }
+    }
+}
+
+/// A tap that begins only inside an area of the view, so the rest of the row keeps its own tap.
+private final class AreaTapGestureRecognizer: UITapGestureRecognizer {
+    var isInArea: ((CGPoint) -> Bool)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first, let view = self.view, let isInArea = self.isInArea, isInArea(touch.location(in: view)) {
+            super.touchesBegan(touches, with: event)
+        } else {
+            self.state = .failed
         }
     }
 }
