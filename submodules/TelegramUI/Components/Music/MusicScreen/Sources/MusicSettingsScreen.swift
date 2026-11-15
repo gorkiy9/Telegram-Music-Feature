@@ -334,6 +334,49 @@ private func musicSettingsEntries(strings: PresentationStrings, isTabShown: Bool
     return entries
 }
 
+/// The chat picker for the chats whose audio files enter Music; `completion` gets the chosen chats on Done.
+/// With `selectAll` a Select All toolbar is shown; tapping it calls `selectAll` and closes the picker.
+func musicSourceChatsPicker(context: AccountContext, selected: [EnginePeer.Id], selectAll: (() -> Void)? = nil, completion: @escaping ([EnginePeer.Id]) -> Void) -> ViewController {
+    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+    let strings = presentationData.strings
+    var dismissImpl: (() -> Void)?
+    let controller = context.sharedContext.makeContactMultiselectionController(ContactMultiselectionControllerParams(context: context, mode: .chatSelection(ContactMultiselectionControllerMode.ChatSelection(
+        title: strings.Music_ChatsWithMusic,
+        searchPlaceholder: strings.ChatListFilter_AddChatsSearchPlaceholder,
+        selectedChats: Set(selected),
+        additionalCategories: nil,
+        chatListFilters: nil,
+        selectAllTitle: selectAll != nil ? strings.Music_SelectAll : nil,
+        selectAll: selectAll.flatMap { selectAll in
+            return {
+                selectAll()
+                dismissImpl?()
+            }
+        }
+    )), filters: [], alwaysEnabled: true))
+    controller.navigationPresentation = .modal
+    dismissImpl = { [weak controller] in
+        controller?.dismiss()
+    }
+    let _ = (controller.result
+    |> take(1)
+    |> deliverOnMainQueue).startStandalone(next: { [weak controller] result in
+        guard case let .result(peerIds, _) = result else {
+            controller?.dismiss()
+            return
+        }
+        var chosen: [EnginePeer.Id] = []
+        for peerId in peerIds {
+            if case let .peer(id) = peerId {
+                chosen.append(id)
+            }
+        }
+        completion(chosen)
+        controller?.dismiss()
+    })
+    return controller
+}
+
 public func musicSettingsController(context: AccountContext) -> ViewController {
     let statePromise = ValuePromise(MusicSettingsState(), ignoreRepeated: true)
     let stateValue = Atomic(value: MusicSettingsState())
@@ -359,38 +402,14 @@ public func musicSettingsController(context: AccountContext) -> ViewController {
     }, setAllChats: { value in
         updateSources { $0.allChats = value }
     }, addChats: {
-        let presentationData = context.sharedContext.currentPresentationData.with { $0 }
-        let strings = presentationData.strings
-        let controller = context.sharedContext.makeContactMultiselectionController(ContactMultiselectionControllerParams(context: context, mode: .chatSelection(ContactMultiselectionControllerMode.ChatSelection(
-            title: strings.Music_ChatsWithMusic,
-            searchPlaceholder: strings.ChatListFilter_AddChatsSearchPlaceholder,
-            selectedChats: Set(currentSources.chosenPeerIds),
-            additionalCategories: nil,
-            chatListFilters: nil
-        )), filters: [], alwaysEnabled: true))
-        controller.navigationPresentation = .modal
-        let _ = (controller.result
-        |> take(1)
-        |> deliverOnMainQueue).startStandalone(next: { [weak controller] result in
-            guard case let .result(peerIds, _) = result else {
-                controller?.dismiss()
-                return
-            }
-            var chosen: [EnginePeer.Id] = []
-            for peerId in peerIds {
-                if case let .peer(id) = peerId {
-                    chosen.append(id)
-                }
-            }
+        pushImpl?(musicSourceChatsPicker(context: context, selected: currentSources.chosenPeerIds, completion: { chosen in
             updateSources { sources in
                 // Chats already listed keep their place; new ones go to the end.
                 let kept = sources.chosenPeerIds.filter { chosen.contains($0) }
                 let added = chosen.filter { !kept.contains($0) }
                 sources.peerIds = (kept + added).map { $0.toInt64() }
             }
-            controller?.dismiss()
-        })
-        pushImpl?(controller)
+        }))
     }, removeChat: { peerId in
         updateState { state in
             var state = state

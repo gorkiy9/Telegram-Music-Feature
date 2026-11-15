@@ -514,7 +514,12 @@ public func chatListItemStrings(strings: PresentationStrings, nameDisplayOrder: 
                     case let webpage as TelegramMediaWebpage:
                         if messageText.isEmpty, case let .Loaded(content) = webpage.content {
                             richTextPreview = nil
-                            messageText = content.displayUrl
+                            if content.type == "telegram_music_playlist" {
+                                // Music section concept: a shared playlist reads like a photo, its cover beside "Playlist".
+                                messageText = strings.Music_Playlist
+                            } else {
+                                messageText = content.displayUrl
+                            }
                         }
                     case _ as TelegramMediaWidget:
                         // The caption is the preview text; without one, the "Widget" stub.

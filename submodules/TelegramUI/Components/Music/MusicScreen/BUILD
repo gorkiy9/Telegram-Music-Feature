@@ -28,6 +28,7 @@ swift_library(
         "//submodules/ItemListPeerItem",
         "//submodules/ContactsPeerItem",
         "//submodules/AvatarNode",
+        "//submodules/AvatarVideoNode",
         "//submodules/ChatListSearchItemHeader",
         "//submodules/ContextUI",
         "//submodules/ICloudResources",
@@ -60,6 +61,7 @@ swift_library(
         "//submodules/TelegramUI/Components/MediaEditorScreen",
         "//submodules/AttachmentUI",
         "//submodules/ChatSendMessageActionUI",
+        "//submodules/TelegramUI/Components/EmptyStateIndicatorComponent",
     ],
     visibility = [
         "//visibility:public",

@@ -97,6 +97,7 @@ swift_library(
         "//submodules/ActivityIndicator:ActivityIndicator",
         "//submodules/ProgressNavigationButtonNode:ProgressNavigationButtonNode",
         "//submodules/ItemListUI:ItemListUI",
+        "//submodules/TelegramUI/Components/GlassControls",
         "//submodules/TelegramBaseController:TelegramBaseController",
         "//submodules/DeviceLocationManager:DeviceLocationManager",
         "//submodules/AvatarNode:AvatarNode",

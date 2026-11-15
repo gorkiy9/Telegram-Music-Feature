@@ -9,6 +9,7 @@ import ItemListUI
 import PresentationDataUtils
 import ActivityIndicator
 import AvatarNode
+import AvatarVideoNode
 import TelegramStringFormatting
 import PeerPresenceStatusManager
 import AppBundle
@@ -160,6 +161,8 @@ public class ItemListAvatarAndNameInfoItem: ListViewItem, ItemListItem, ListItem
     let avatarTapped: () -> Void
     let context: ItemListAvatarAndNameInfoItemContext?
     let updatingImage: ItemListAvatarAndNameInfoItemUpdatingAvatar?
+    /// The emoji an updating image was made from: drawn animated over it, as the profile's editing avatar does.
+    let updatingImageMarkup: TelegramMediaImage.EmojiMarkup?
     let call: (() -> Void)?
     let action: (() -> Void)?
     let longTapAction: (() -> Void)?
@@ -169,7 +172,7 @@ public class ItemListAvatarAndNameInfoItem: ListViewItem, ItemListItem, ListItem
     
     public let selectable: Bool
 
-    public init(itemContext: ItemContext, presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, dateTimeFormat: PresentationDateTimeFormat, mode: ItemListAvatarAndNameInfoItemMode, peer: EnginePeer?, presence: EnginePeer.Presence?, label: String? = nil, memberCount: Int?, state: ItemListAvatarAndNameInfoItemState, sectionId: ItemListSectionId, style: ItemListAvatarAndNameInfoItemStyle, editingNameUpdated: @escaping (ItemListAvatarAndNameInfoItemName) -> Void, editingNameCompleted: @escaping () -> Void = {}, avatarTapped: @escaping () -> Void, context: ItemListAvatarAndNameInfoItemContext? = nil, updatingImage: ItemListAvatarAndNameInfoItemUpdatingAvatar? = nil, call: (() -> Void)? = nil, action: (() -> Void)? = nil, longTapAction: (() -> Void)? = nil, tag: ItemListItemTag? = nil, namePlaceholder: String? = nil) {
+    public init(itemContext: ItemContext, presentationData: ItemListPresentationData, systemStyle: ItemListSystemStyle = .legacy, dateTimeFormat: PresentationDateTimeFormat, mode: ItemListAvatarAndNameInfoItemMode, peer: EnginePeer?, presence: EnginePeer.Presence?, label: String? = nil, memberCount: Int?, state: ItemListAvatarAndNameInfoItemState, sectionId: ItemListSectionId, style: ItemListAvatarAndNameInfoItemStyle, editingNameUpdated: @escaping (ItemListAvatarAndNameInfoItemName) -> Void, editingNameCompleted: @escaping () -> Void = {}, avatarTapped: @escaping () -> Void, context: ItemListAvatarAndNameInfoItemContext? = nil, updatingImage: ItemListAvatarAndNameInfoItemUpdatingAvatar? = nil, updatingImageMarkup: TelegramMediaImage.EmojiMarkup? = nil, call: (() -> Void)? = nil, action: (() -> Void)? = nil, longTapAction: (() -> Void)? = nil, tag: ItemListItemTag? = nil, namePlaceholder: String? = nil) {
         self.itemContext = itemContext
         self.namePlaceholder = namePlaceholder
         self.presentationData = presentationData
@@ -188,6 +191,7 @@ public class ItemListAvatarAndNameInfoItem: ListViewItem, ItemListItem, ListItem
         self.avatarTapped = avatarTapped
         self.context = context
         self.updatingImage = updatingImage
+        self.updatingImageMarkup = updatingImageMarkup
         self.call = call
         self.action = action
         self.longTapAction = longTapAction
@@ -284,6 +288,9 @@ public class ItemListAvatarAndNameInfoItem: ListViewItem, ItemListItem, ListItem
         if lhs.updatingImage != rhs.updatingImage {
             return false
         }
+        if lhs.updatingImageMarkup != rhs.updatingImageMarkup {
+            return false
+        }
         return true
     }
 }
@@ -298,6 +305,7 @@ public class ItemListAvatarAndNameInfoItemNode: ListViewItemNode, ItemListItemNo
     private let maskNode: ASImageNode
     
     private let avatarNode: AvatarNode
+    private var markupNode: AvatarVideoNode?
     private let updatingAvatarOverlay: ASImageNode
     private let activityIndicator: ActivityIndicator
     
@@ -801,6 +809,24 @@ public class ItemListAvatarAndNameInfoItemNode: ListViewItemNode, ItemListItemNo
                     let avatarFrame = CGRect(origin: CGPoint(x: params.leftInset + 15.0, y: floor((layout.contentSize.height - 66.0) / 2.0)), size: CGSize(width: 66.0, height: 66.0))
                     strongSelf.avatarNode.frame = avatarFrame
                     strongSelf.updatingAvatarOverlay.frame = avatarFrame
+                    
+                    if let markup = item.updatingImageMarkup, case .image = item.updatingImage, let context = item.itemContext.accountContext {
+                        let markupNode: AvatarVideoNode
+                        if let current = strongSelf.markupNode {
+                            markupNode = current
+                        } else {
+                            markupNode = AvatarVideoNode(context: context)
+                            strongSelf.avatarNode.contentNode.addSubnode(markupNode)
+                            strongSelf.markupNode = markupNode
+                        }
+                        markupNode.update(markup: markup, size: CGSize(width: 320.0, height: 320.0))
+                        markupNode.frame = CGRect(origin: CGPoint(), size: avatarFrame.size)
+                        markupNode.updateLayout(size: avatarFrame.size, cornerRadius: avatarFrame.width / 2.0, transition: .immediate)
+                        markupNode.updateVisibility(true)
+                    } else if let markupNode = strongSelf.markupNode {
+                        strongSelf.markupNode = nil
+                        markupNode.removeFromSupernode()
+                    }
                     
                     let indicatorSize = strongSelf.activityIndicator.measure(CGSize(width: 100.0, height: 100.0))
                     strongSelf.activityIndicator.frame = CGRect(origin: CGPoint(x: floorToScreenPixels(avatarFrame.midX - indicatorSize.width / 2.0), y: floorToScreenPixels(avatarFrame.midY - indicatorSize.height / 2.0)), size: indicatorSize)

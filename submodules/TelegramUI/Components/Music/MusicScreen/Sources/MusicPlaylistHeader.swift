@@ -13,6 +13,7 @@ import DynamicIslandMask
 import AccountContext
 import TelegramCore
 import AvatarNode
+import AvatarVideoNode
 
 /// Lies over the list and lets it take every touch except the author's line, which opens the author's profile.
 private final class MusicPlaylistHeaderOverlayView: UIView {
@@ -129,6 +130,8 @@ final class MusicPlaylistHeaderView: UIView {
     private let bottomCoverView = UIView()
     private let coverContainer = UIView()
     private let coverImageView = UIImageView()
+    /// An emoji cover animated over its still frame, as a profile's emoji photo (`AvatarVideoNode`).
+    private var coverEmojiNode: AvatarVideoNode?
     private let shadeView = UIImageView()
     private let maskNode = DynamicIslandMaskNode()
     private let topCoverNode = DynamicIslandBlurNode()
@@ -248,7 +251,7 @@ final class MusicPlaylistHeaderView: UIView {
     }
 
     /// `offset` is the list's: 0 at rest, negative while pulled down.
-    func update(theme: PresentationTheme, title: String, subtitle: String, author: Author? = nil, cover: UIImage?, isExpanded: Bool, size: CGSize, statusBarHeight: CGFloat, hasDynamicIsland: Bool, offset: CGFloat, transition: ContainedViewLayoutTransition) {
+    func update(theme: PresentationTheme, title: String, subtitle: String, author: Author? = nil, cover: UIImage?, coverMarkup: (context: AccountContext, markup: TelegramMediaImage.EmojiMarkup)? = nil, isExpanded: Bool, size: CGSize, statusBarHeight: CGFloat, hasDynamicIsland: Bool, offset: CGFloat, transition: ContainedViewLayoutTransition) {
         let width = size.width
         let sideInset: CGFloat = 16.0
         let isExpanded = isExpanded && cover != nil
@@ -331,6 +334,27 @@ final class MusicPlaylistHeaderView: UIView {
         transition.updateCornerRadius(layer: self.coverContainer.layer, cornerRadius: isExpanded ? 0.0 : avatarSize * 0.5)
         MusicPlaylistHeaderView.setScale(self.coverContainer.layer, coverScale, transition: transition)
         transition.updateFrame(view: self.coverImageView, frame: CGRect(origin: CGPoint(), size: coverSize))
+        if cover != nil, let coverMarkup {
+            // Laid out once at the expanded size and scaled to the cover, so a fold shrinks it with the container.
+            let emojiSize = CGSize(width: width, height: width)
+            let emojiNode: AvatarVideoNode
+            if let current = self.coverEmojiNode {
+                emojiNode = current
+            } else {
+                emojiNode = AvatarVideoNode(context: coverMarkup.context)
+                self.coverEmojiNode = emojiNode
+                self.coverContainer.insertSubview(emojiNode.view, aboveSubview: self.coverImageView)
+            }
+            emojiNode.update(markup: coverMarkup.markup, size: emojiSize)
+            emojiNode.updateLayout(size: emojiSize, cornerRadius: 0.0, transition: .immediate)
+            emojiNode.bounds = CGRect(origin: CGPoint(), size: emojiSize)
+            transition.updatePosition(node: emojiNode, position: CGPoint(x: coverSize.width * 0.5, y: coverSize.height * 0.5))
+            transition.updateTransformScale(node: emojiNode, scale: coverSize.width / emojiSize.width)
+            emojiNode.updateVisibility(true)
+        } else if let emojiNode = self.coverEmojiNode {
+            self.coverEmojiNode = nil
+            emojiNode.view.removeFromSuperview()
+        }
         transition.updateFrame(view: self.shadeView, frame: CGRect(x: 0.0, y: coverSize.height - 200.0, width: coverSize.width, height: 200.0))
         transition.updateAlpha(layer: self.shadeView.layer, alpha: isExpanded ? 1.0 : 0.0)
 
@@ -644,6 +668,10 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
     private let favoriteButton = ComponentView<Empty>()
     private let searchButton = ComponentView<Empty>()
     private var item: MusicPlaylistActionsItem?
+    /// The favorite toggle bounces like the player's: on the icon its tap brings in (star ↔ crossed star), once the
+    /// library's new state reaches the list; a tap that changes nothing bounces the current icon.
+    private var favoriteContentId: AnyHashable?
+    private var pendingFavoriteBounce = false
 
     init() {
         super.init(layerBacked: false, rotated: false, seeThrough: false)
@@ -666,6 +694,8 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 action: { [weak self, weak view] in
                     if action == .play || action == .shuffle {
                         MusicButtonIconAnimation.bounce(in: view?.view)
+                    } else if action == .favorite {
+                        self?.favoriteTapped()
                     }
                     self?.item?.action(action)
                 }
@@ -680,6 +710,17 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
             buttonView.isHidden = false
             buttonView.frame = frame
         }
+    }
+
+    private func favoriteTapped() {
+        self.pendingFavoriteBounce = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: { [weak self] in
+            guard let self, self.pendingFavoriteBounce else {
+                return
+            }
+            self.pendingFavoriteBounce = false
+            MusicButtonIconAnimation.bounce(in: self.favoriteButton.view)
+        })
     }
 
     /// Add at the same 17 pt semibold title and 24 pt glyph as every other button of the section, across the full width.
@@ -742,8 +783,18 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                     self.updateButton(self.shuffleButton, background: glassBackground, content: iconContent("Music/Shuffle", 24.0, foreground), frame: CGRect(origin: CGPoint(x: x, y: 0.0), size: roundSize), action: .shuffle)
                     x += height + spacing
                 }
-                // A favorite playlist shows the star in the accent colour.
-                self.updateButton(self.favoriteButton, background: glassBackground, content: iconContent("Music/Star", 24.0, item.isFavorite ? theme.list.itemAccentColor : foreground), frame: CGRect(origin: CGPoint(x: x, y: 0.0), size: roundSize), action: .favorite)
+                // As the player's Favorites toggle: a favorite playlist shows the crossed star (the tap removes it) in the
+                // accent colour on accent-tinted glass.
+                let accentGlass = theme.list.itemAccentColor.withMultipliedAlpha(0.1)
+                let favoriteBackground = item.isFavorite ? ButtonComponent.Background(style: .actualGlass, color: accentGlass, foreground: theme.list.itemAccentColor, pressedColor: accentGlass, cornerRadius: height * 0.5) : glassBackground
+                let favoriteContent = iconContent(item.isFavorite ? "Music/StarSlash" : "Music/Star", 24.0, item.isFavorite ? theme.list.itemAccentColor : foreground)
+                let favoriteChanged = self.favoriteContentId != nil && self.favoriteContentId != favoriteContent.id
+                self.favoriteContentId = favoriteContent.id
+                self.updateButton(self.favoriteButton, background: favoriteBackground, content: favoriteContent, frame: CGRect(origin: CGPoint(x: x, y: 0.0), size: roundSize), action: .favorite)
+                if favoriteChanged && self.pendingFavoriteBounce {
+                    self.pendingFavoriteBounce = false
+                    MusicButtonIconAnimation.bounce(in: self.favoriteButton.view)
+                }
                 x += height + spacing
                 if item.isEmpty {
                     self.searchButton.view?.isHidden = true

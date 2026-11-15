@@ -51,17 +51,21 @@ final class AvatarEditorScreenComponent: Component {
     let ready: Promise<Bool>
     let peerType: AvatarEditorScreen.PeerType
     let markup: TelegramMediaImage.EmojiMarkup?
+    /// Replaces the peer type's «Set as … Photo» on the confirm button, for an image that is not a peer's photo.
+    let buttonTitle: String?
     
     init(
         context: AccountContext,
         ready: Promise<Bool>,
         peerType: AvatarEditorScreen.PeerType,
-        markup: TelegramMediaImage.EmojiMarkup?
+        markup: TelegramMediaImage.EmojiMarkup?,
+        buttonTitle: String? = nil
     ) {
         self.context = context
         self.ready = ready
         self.peerType = peerType
         self.markup = markup
+        self.buttonTitle = buttonTitle
     }
     
     static func ==(lhs: AvatarEditorScreenComponent, rhs: AvatarEditorScreenComponent) -> Bool {
@@ -72,6 +76,9 @@ final class AvatarEditorScreenComponent: Component {
             return false
         }
         if lhs.markup != rhs.markup {
+            return false
+        }
+        if lhs.buttonTitle != rhs.buttonTitle {
             return false
         }
         return true
@@ -1308,7 +1315,7 @@ final class AvatarEditorScreenComponent: Component {
                 contentHeight += 16.0
             }
             
-            let buttonText: String
+            var buttonText: String
             switch component.peerType {
             case .suggest:
                 buttonText = strings.AvatarEditor_SuggestProfilePhoto
@@ -1320,6 +1327,9 @@ final class AvatarEditorScreenComponent: Component {
                 buttonText = strings.AvatarEditor_SetChannelPhoto
             case .community:
                 buttonText = strings.AvatarEditor_SetCommunityPhoto
+            }
+            if let buttonTitle = component.buttonTitle {
+                buttonText = buttonTitle
             }
             
             var isLocked = false
@@ -1673,12 +1683,12 @@ public final class AvatarEditorScreen: ViewControllerComponentContainer {
         return signal
     }
     
-    public init(context: AccountContext, inputData: Signal<AvatarKeyboardInputData, NoError>, peerType: PeerType, markup: TelegramMediaImage.EmojiMarkup?) {
+    public init(context: AccountContext, inputData: Signal<AvatarKeyboardInputData, NoError>, peerType: PeerType, markup: TelegramMediaImage.EmojiMarkup?, buttonTitle: String? = nil) {
         self.context = context
         self.inputData = inputData
         
         let componentReady = Promise<Bool>()
-        super.init(context: context, component: AvatarEditorScreenComponent(context: context, ready: componentReady, peerType: peerType, markup: markup), navigationBarAppearance: .transparent)
+        super.init(context: context, component: AvatarEditorScreenComponent(context: context, ready: componentReady, peerType: peerType, markup: markup, buttonTitle: buttonTitle), navigationBarAppearance: .transparent)
         
         self.automaticallyControlPresentationContextLayout = false
         

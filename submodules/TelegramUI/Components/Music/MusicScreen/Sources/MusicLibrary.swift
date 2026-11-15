@@ -87,6 +87,8 @@ struct MusicPlaylist: Equatable {
     var trackIds: [EngineMessage.Id]
     /// The cover picked on this device, stored in the media box as a local file.
     var cover: TelegramMediaImageRepresentation? = nil
+    /// The emoji or sticker the cover was made from: the playlist draws it animated, as a profile draws an emoji photo.
+    var coverMarkup: TelegramMediaImage.EmojiMarkup? = nil
     let dateAdded: Int32
     var dateUpdated: Int32
 }
@@ -153,8 +155,18 @@ private struct MusicStoredPlaylists: Codable {
         let isInProfile: Bool
         let fileIds: [FileId]
         let cover: Cover?
+        /// Absent in playlists stored before covers could be animated.
+        let coverEmoji: CoverEmoji?
         let dateAdded: Int32
         let dateUpdated: Int32
+    }
+
+    /// `TelegramMediaImage.EmojiMarkup`: an emoji by file id, or a sticker when the pack is set.
+    struct CoverEmoji: Codable {
+        let fileId: Int64
+        let packId: Int64?
+        let packAccessHash: Int64?
+        let backgroundColors: [Int32]
     }
 
     let playlists: [Playlist]
@@ -786,11 +798,17 @@ final class MusicLibrary {
                 let cover = playlist.cover.flatMap { cover in
                     return TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: cover.width, height: cover.height), resource: LocalFileMediaResource(fileId: cover.fileId), progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
                 }
+                let coverMarkup = playlist.coverEmoji.flatMap { emoji -> TelegramMediaImage.EmojiMarkup in
+                    if let packId = emoji.packId, let packAccessHash = emoji.packAccessHash {
+                        return TelegramMediaImage.EmojiMarkup(content: .sticker(packReference: .id(id: packId, accessHash: packAccessHash), fileId: emoji.fileId), backgroundColors: emoji.backgroundColors)
+                    }
+                    return TelegramMediaImage.EmojiMarkup(content: .emoji(fileId: emoji.fileId), backgroundColors: emoji.backgroundColors)
+                }
                 self.pendingPlaylistFileIds[Int(playlist.id)] = playlist.fileIds
-                return MusicPlaylist(id: Int(playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: [], cover: cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+                return MusicPlaylist(id: Int(playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: [], cover: cover, coverMarkup: cover != nil ? coverMarkup : nil, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
             }
             for var playlist in createdMeanwhile {
-                playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: playlist.trackIds, cover: playlist.cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+                playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: playlist.trackIds, cover: playlist.cover, coverMarkup: playlist.coverMarkup, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
                 self.playlists.append(playlist)
             }
             if !createdMeanwhile.isEmpty {
@@ -912,7 +930,18 @@ final class MusicLibrary {
             if let representation = playlist.cover, let resource = representation.resource as? LocalFileMediaResource {
                 cover = MusicStoredPlaylists.Cover(fileId: resource.fileId, width: representation.dimensions.width, height: representation.dimensions.height)
             }
-            return MusicStoredPlaylists.Playlist(id: Int32(clamping: playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, fileIds: playlistFileIds, cover: cover, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+            var coverEmoji: MusicStoredPlaylists.CoverEmoji?
+            if cover != nil, let markup = playlist.coverMarkup {
+                switch markup.content {
+                case let .emoji(fileId):
+                    coverEmoji = MusicStoredPlaylists.CoverEmoji(fileId: fileId, packId: nil, packAccessHash: nil, backgroundColors: markup.backgroundColors)
+                case let .sticker(packReference, fileId):
+                    if case let .id(packId, packAccessHash) = packReference {
+                        coverEmoji = MusicStoredPlaylists.CoverEmoji(fileId: fileId, packId: packId, packAccessHash: packAccessHash, backgroundColors: markup.backgroundColors)
+                    }
+                }
+            }
+            return MusicStoredPlaylists.Playlist(id: Int32(clamping: playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, fileIds: playlistFileIds, cover: cover, coverEmoji: coverEmoji, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
         })
         let _ = self.context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.playlists.buffer, item: stored).startStandalone()
     }
@@ -941,9 +970,9 @@ final class MusicLibrary {
     }
 
     @discardableResult
-    func createPlaylist(title: String, description: String = "", trackIds: [EngineMessage.Id] = [], cover: TelegramMediaImageRepresentation? = nil) -> MusicPlaylist {
+    func createPlaylist(title: String, description: String = "", trackIds: [EngineMessage.Id] = [], cover: TelegramMediaImageRepresentation? = nil, coverMarkup: TelegramMediaImage.EmojiMarkup? = nil) -> MusicPlaylist {
         let now = Int32(Date().timeIntervalSince1970)
-        let playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: title, description: description, isFavorite: false, trackIds: trackIds, cover: cover, dateAdded: now, dateUpdated: now)
+        let playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: title, description: description, isFavorite: false, trackIds: trackIds, cover: cover, coverMarkup: coverMarkup, dateAdded: now, dateUpdated: now)
         self.playlists.append(playlist)
         self.storePlaylists()
         self.notifyUpdated()
@@ -1084,23 +1113,28 @@ final class MusicLibrary {
         self.notifyUpdated()
     }
 
-    /// Empties Music: every track is taken out (the profile and the chats keep their files) and the playlists go.
-    /// Chat audio still loading is taken out once it has arrived; files that come later enter Music as usual.
+    /// Empties Music: the playlists go, the chosen source chats are reset to none, and every track that is not only
+    /// a chat's is taken out (the profile and the chats keep their files). Chat audio is left alone: with no source
+    /// chats none of it is listed, and choosing a chat again brings its music back.
+    /// The profile's music still loading is taken out once it has arrived; files that come later enter Music as usual.
     func removeAll() {
+        setMusicSourceSettings(context: self.context, MusicSourceSettings(allChats: false, peerIds: []))
+        // Applied here too: the stored setting reaches the subscription a moment later.
+        self.sourcePeerIds = Set()
         let apply: () -> Void = { [weak self] in
             guard let self else {
                 return
             }
-            let tracks = self.allTracks
-            // Chats left out of the sources too: choosing them again later must not bring the music back.
-            let hiddenFileIds = Set(self.chatMessages.compactMap { musicFileId($0)?.id }).subtracting(self.removedFileIds)
-            if !hiddenFileIds.isEmpty {
-                self.removedFileIds.formUnion(hiddenFileIds)
-                self.storeFileIds(self.removedFileIds, key: .removed)
+            let chatFileIds = Set(self.chatMessages.compactMap { musicFileId($0)?.id })
+            let tracks = self.allTracks.filter { track in
+                guard let fileId = track.file?.fileId.id else {
+                    return true
+                }
+                return track.isSaved || !chatFileIds.contains(fileId)
             }
             if !tracks.isEmpty {
                 self.remove(tracks: tracks)
-            } else if !hiddenFileIds.isEmpty {
+            } else {
                 self.notifyUpdated()
             }
             if !self.playlists.isEmpty {

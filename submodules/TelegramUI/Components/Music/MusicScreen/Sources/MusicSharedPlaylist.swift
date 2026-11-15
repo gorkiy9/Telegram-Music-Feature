@@ -13,14 +13,22 @@ import PeerMessagesMediaPlaylist
 /// playlists: a real one would come from the server as `webPage` with a playlist attribute (see the README).
 public let musicSharedPlaylistWebpageType = "telegram_music_playlist"
 
+/// The playlist's public link, named after the playlist: words joined by "_", only letters and digits kept (any script),
+/// as public usernames and folder links read. The API has no playlists, so nothing resolves it yet (see the README).
+func musicPlaylistLink(playlist: MusicPlaylist) -> String {
+    let words = playlist.title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+    let slug = words.isEmpty ? "\(playlist.id)" : words.joined(separator: "_")
+    return "https://t.me/music/playlist/\(slug)"
+}
+
 func musicSharedPlaylistWebpage(playlist: MusicPlaylist, files: [TelegramMediaFile], ownerName: String?) -> TelegramMediaWebpage {
     let image = playlist.cover.flatMap { cover in
         return TelegramMediaImage(imageId: EngineMedia.Id(namespace: Namespaces.Media.LocalImage, id: Int64.random(in: 1 ... Int64.max)), representations: [cover], immediateThumbnailData: nil, reference: nil, partialReference: nil, flags: [])
     }
-    let url = "https://t.me/music/playlist/\(playlist.id)"
+    let url = musicPlaylistLink(playlist: playlist)
     let content = TelegramMediaWebpageLoadedContent(
         url: url,
-        displayUrl: "t.me/music/playlist/\(playlist.id)",
+        displayUrl: String(url.dropFirst("https://".count)),
         hash: 0,
         type: musicSharedPlaylistWebpageType,
         websiteName: "Telegram",

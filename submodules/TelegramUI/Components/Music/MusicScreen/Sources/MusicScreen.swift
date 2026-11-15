@@ -432,7 +432,19 @@ public final class MusicScreen: ViewController {
         guard !tracks.isEmpty else {
             return
         }
-        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: musicSharePlaylistSubject(context: self.context, playlist: playlist, tracks: tracks), completed: { [weak self] peerIds in
+        let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
+        let link = musicPlaylistLink(playlist: playlist)
+        // "Copy Link" as on a profile's share sheet: the sheet's action button while no chat is selected, then the
+        // client's link-copied toast.
+        let copyLink = ShareControllerAction(title: presentationData.strings.ShareMenu_CopyShareLink, action: { [weak self] in
+            UIPasteboard.general.string = link
+            guard let self else {
+                return
+            }
+            let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
+            self.present(UndoOverlayController(presentationData: presentationData, content: .linkCopied(title: nil, text: presentationData.strings.Conversation_LinkCopied), elevatedLayout: false, animateInAsReplacement: false, action: { _ in return false }), in: .current)
+        })
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: musicSharePlaylistSubject(context: self.context, playlist: playlist, tracks: tracks), preferredAction: .custom(action: copyLink), completed: { [weak self] peerIds in
             self?.presentForwardedToast(peerIds: peerIds)
         }, hidesSenderNames: true)), in: .window(.root))
     }
@@ -703,6 +715,23 @@ public final class MusicScreen: ViewController {
             })])
         ])
         self.present(actionSheet, in: .window(.root))
+    }
+
+    /// Picks the chats whose audio files enter Music (the empty hub's offer); Done makes them the only sources.
+    func chooseSourceChats() {
+        let context = self.context
+        let _ = (musicSourceSettings(context: context)
+        |> take(1)
+        |> deliverOnMainQueue).start(next: { [weak self] sources in
+            guard let self else {
+                return
+            }
+            self.push(musicSourceChatsPicker(context: context, selected: sources.allChats ? [] : sources.chosenPeerIds, selectAll: {
+                setMusicSourceSettings(context: context, MusicSourceSettings(allChats: true, peerIds: []))
+            }, completion: { chosen in
+                setMusicSourceSettings(context: context, MusicSourceSettings(allChats: false, peerIds: chosen.map { $0.toInt64() }))
+            }))
+        })
     }
 
     /// Picks an audio file and opens the new track screen with its tags; Done uploads it to the profile.

@@ -18,6 +18,7 @@ swift_library(
         "//submodules/PeerPresenceStatusManager:PeerPresenceStatusManager",
         "//submodules/TelegramStringFormatting:TelegramStringFormatting",
         "//submodules/AvatarNode:AvatarNode",
+        "//submodules/AvatarVideoNode",
         "//submodules/ActivityIndicator:ActivityIndicator",
         "//submodules/ItemListUI:ItemListUI",
         "//submodules/AppBundle:AppBundle",

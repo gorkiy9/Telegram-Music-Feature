@@ -65,7 +65,7 @@ private enum MusicPlaylistEditEntryId: Hashable {
 }
 
 private enum MusicPlaylistEditEntry: ItemListNodeEntry {
-    case info(title: String, cover: TelegramMediaImageRepresentation?)
+    case info(title: String, cover: TelegramMediaImageRepresentation?, coverMarkup: TelegramMediaImage.EmojiMarkup?)
     case description(text: String, placeholder: String)
     case descriptionInfo(String)
     case addTracks(String)
@@ -116,8 +116,8 @@ private enum MusicPlaylistEditEntry: ItemListNodeEntry {
 
     static func ==(lhs: MusicPlaylistEditEntry, rhs: MusicPlaylistEditEntry) -> Bool {
         switch lhs {
-        case let .info(title, cover):
-            if case .info(title, cover) = rhs {
+        case let .info(title, cover, coverMarkup):
+            if case .info(title, cover, coverMarkup) = rhs {
                 return true
             }
             return false
@@ -152,7 +152,7 @@ private enum MusicPlaylistEditEntry: ItemListNodeEntry {
         let arguments = arguments as! MusicPlaylistEditArguments
         let strings = presentationData.strings
         switch self {
-        case let .info(title, cover):
+        case let .info(title, cover, coverMarkup):
             // The item draws a peer; like a channel being created, the playlist is a placeholder group named after it.
             let peer = TelegramGroup(id: EnginePeer.Id(namespace: Namespaces.Peer.CloudGroup, id: EnginePeer.Id.Id._internalFromInt64Value(0)), title: title, photo: [], participantCount: 0, role: .creator(rank: nil), membership: .Member, flags: [], defaultBannedRights: nil, migrationReference: nil, creationDate: 0, version: 0)
             let name = ItemListAvatarAndNameInfoItemName.title(title: title, type: .group)
@@ -163,7 +163,7 @@ private enum MusicPlaylistEditEntry: ItemListNodeEntry {
             }, editingNameCompleted: {
             }, avatarTapped: {
                 arguments.changeCover()
-            }, updatingImage: cover.flatMap { .image($0, false) }, tag: MusicPlaylistEditEntryTag.info, namePlaceholder: strings.Music_PlaylistName)
+            }, updatingImage: cover.flatMap { .image($0, false) }, updatingImageMarkup: coverMarkup, tag: MusicPlaylistEditEntryTag.info, namePlaceholder: strings.Music_PlaylistName)
         case let .description(text, placeholder):
             return ItemListMultilineInputItem(presentationData: presentationData, systemStyle: .glass, text: text, placeholder: placeholder, maxLength: ItemListMultilineInputItemTextLimit(value: 255, display: true), sectionId: self.section, style: .blocks, textUpdated: { text in
                 arguments.updateDescription(text)
@@ -238,8 +238,11 @@ final class MusicPlaylistEditChrome {
         }
         let listNode = node.listNode
         let listView = listNode.view
+        // The list inserts animated rows at index 0, so tracks added later would land under the plate: keep it at the bottom.
         if self.plate.superview !== listView {
             listView.insertSubview(self.plate, at: 0)
+        } else if listView.subviews.first !== self.plate {
+            listView.sendSubviewToBack(self.plate)
         }
         self.plate.backgroundColor = self.theme.list.itemBlocksBackgroundColor
         self.plateOverlay.backgroundColor = self.theme.list.itemBlocksBackgroundColor
@@ -353,12 +356,14 @@ private struct MusicPlaylistEditState: Equatable {
     var description: String
     var trackIds: [EngineMessage.Id]
     var cover: TelegramMediaImageRepresentation?
+    /// The emoji a cover was made from, drawn animated over the cover's still frame.
+    var coverMarkup: TelegramMediaImage.EmojiMarkup?
 }
 
 /// Creating a playlist, and editing one: the name and photo card, a description and the tracks, as a channel is created.
 /// The result is kept in the library's memory: the API has no playlists.
 func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, playlist: MusicPlaylist?, initialTrackIds: [EngineMessage.Id] = [], completion: @escaping (MusicPlaylist) -> Void) -> ViewController {
-    let initialState = MusicPlaylistEditState(title: playlist?.title ?? "", description: playlist?.description ?? "", trackIds: playlist?.trackIds ?? initialTrackIds, cover: playlist?.cover)
+    let initialState = MusicPlaylistEditState(title: playlist?.title ?? "", description: playlist?.description ?? "", trackIds: playlist?.trackIds ?? initialTrackIds, cover: playlist?.cover, coverMarkup: playlist?.coverMarkup)
     let statePromise = ValuePromise(initialState, ignoreRepeated: true)
     let stateValue = Atomic(value: initialState)
     let updateState: ((MusicPlaylistEditState) -> MusicPlaylistEditState) -> Void = { f in
@@ -370,10 +375,11 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
     var endEditingImpl: (() -> Void)?
     var presentImpl: ((ViewController) -> Void)?
     var avatarPickerHolder: Any?
-    let setCover: (TelegramMediaImageRepresentation?) -> Void = { cover in
+    let setCover: (TelegramMediaImageRepresentation?, TelegramMediaImage.EmojiMarkup?) -> Void = { cover, markup in
         updateState { state in
             var state = state
             state.cover = cover
+            state.coverMarkup = cover != nil ? markup : nil
             return state
         }
     }
@@ -392,19 +398,20 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
         }
     }, changeCover: {
         endEditingImpl?()
-        presentMusicCoverPicker(context: context, hasCover: stateValue.with { $0.cover != nil }, pickerHolder: { holder in
+        let buttonTitle = context.sharedContext.currentPresentationData.with { $0 }.strings.Music_SetAsPlaylistCover
+        presentMusicCoverPicker(context: context, hasCover: stateValue.with { $0.cover != nil }, buttonTitle: buttonTitle, pickerHolder: { holder in
             avatarPickerHolder = holder
         }, push: { controller in
             pushImpl?(controller)
         }, present: { controller in
             presentImpl?(controller)
-        }, completion: { image in
+        }, completion: { image, markup in
             if let image {
                 if let cover = musicPlaylistCover(context: context, image: image) {
-                    setCover(cover)
+                    setCover(cover, markup)
                 }
             } else {
-                setCover(nil)
+                setCover(nil, nil)
             }
         })
     }, addTracks: {
@@ -441,10 +448,11 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
                 playlist.description = description
                 playlist.trackIds = state.trackIds
                 playlist.cover = state.cover
+                playlist.coverMarkup = state.coverMarkup
             })
             result = library.playlist(id: playlist.id)
         } else {
-            result = library.createPlaylist(title: title, description: description, trackIds: state.trackIds, cover: state.cover)
+            result = library.createPlaylist(title: title, description: description, trackIds: state.trackIds, cover: state.cover, coverMarkup: state.coverMarkup)
         }
         dismissImpl?()
         if let result {
@@ -477,7 +485,7 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
         let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text(strings.Music_Playlist), leftNavigationButton: leftButton, rightNavigationButton: rightButton, backNavigationButton: ItemListBackButton(title: strings.Common_Back))
 
         var entries: [MusicPlaylistEditEntry] = [
-            .info(title: state.title, cover: state.cover),
+            .info(title: state.title, cover: state.cover, coverMarkup: state.coverMarkup),
             .description(text: state.description, placeholder: strings.Music_Description),
             .descriptionInfo(strings.Music_YouCanDescribeYourPlaylist),
             .addTracks(strings.Music_AddTracks)
@@ -577,18 +585,19 @@ func musicPlaylistCover(context: AccountContext, image: UIImage) -> TelegramMedi
 }
 
 /// The avatar picker of a new channel: gallery, camera or an emoji, then the round crop. A video keeps only its cover frame.
-/// Completes with the picked image, or nil when the cover is deleted.
-func presentMusicCoverPicker(context: AccountContext, hasCover: Bool, pickerHolder: @escaping (Any?) -> Void, push: @escaping (ViewController) -> Void, present: @escaping (ViewController) -> Void, completion: @escaping (UIImage?) -> Void) {
+/// Completes with the picked image, or nil when the cover is deleted, and the emoji markup when an animated emoji or
+/// sticker was picked. `buttonTitle` replaces the emoji editor's «Set as Channel Photo».
+func presentMusicCoverPicker(context: AccountContext, hasCover: Bool, buttonTitle: String, pickerHolder: @escaping (Any?) -> Void, push: @escaping (ViewController) -> Void, present: @escaping (ViewController) -> Void, completion: @escaping (UIImage?, TelegramMediaImage.EmojiMarkup?) -> Void) {
     let keyboardInputData = Promise<AvatarKeyboardInputData>()
     keyboardInputData.set(AvatarEditorScreen.inputData(context: context, isGroup: true))
 
     let applyImage: (UIImage) -> Void = { image in
-        completion(image)
+        completion(image, nil)
     }
 
     var dismissPickerImpl: (() -> Void)?
     let (mainController, holder) = context.sharedContext.makeAvatarMediaPickerScreen(context: context, peerType: .channel, getSourceRect: { return nil }, canDelete: hasCover, performDelete: {
-        completion(nil)
+        completion(nil, nil)
     }, completion: { result, transitionView, transitionRect, transitionImage, fromCamera, _, cancelled in
         pickerHolder(nil)
 
@@ -612,13 +621,20 @@ func presentMusicCoverPicker(context: AccountContext, hasCover: Bool, pickerHold
                 }
             }
         } else {
-            let controller = AvatarEditorScreen(context: context, inputData: keyboardInputData.get(), peerType: .channel, markup: nil)
+            let controller = AvatarEditorScreen(context: context, inputData: keyboardInputData.get(), peerType: .channel, markup: nil, buttonTitle: buttonTitle)
             controller.imageCompletion = { image, commit in
                 applyImage(image)
                 commit()
             }
-            controller.videoCompletion = { image, _, _, _, commit in
-                applyImage(image)
+            controller.videoCompletion = { image, _, _, markup, commit in
+                let emojiMarkup: TelegramMediaImage.EmojiMarkup
+                switch markup {
+                case let .emoji(fileId, backgroundColors):
+                    emojiMarkup = TelegramMediaImage.EmojiMarkup(content: .emoji(fileId: fileId), backgroundColors: backgroundColors)
+                case let .sticker(packReference, fileId, backgroundColors):
+                    emojiMarkup = TelegramMediaImage.EmojiMarkup(content: .sticker(packReference: packReference, fileId: fileId), backgroundColors: backgroundColors)
+                }
+                completion(image, emojiMarkup)
                 commit()
             }
             push(controller)

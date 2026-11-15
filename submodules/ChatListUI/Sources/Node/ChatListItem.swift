@@ -3348,7 +3348,7 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                                         }
                                         break inner
                                     } else if let webpage = media as? TelegramMediaWebpage, case let .Loaded(content) = webpage.content {
-                                        let imageTypes = ["photo", "video", "embed", "gif", "document", "telegram_album"]
+                                        let imageTypes = ["photo", "video", "embed", "gif", "document", "telegram_album", "telegram_music_playlist"]
                                         if let image = content.image, let type = content.type, imageTypes.contains(type) {
                                             if let _ = largestImageRepresentation(image.representations) {
                                                 let fitSize = contentImageSize

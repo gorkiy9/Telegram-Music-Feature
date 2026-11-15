@@ -365,13 +365,14 @@ func musicTrackEditScreen(context: AccountContext, library: MusicLibrary, mode: 
 
     let arguments = MusicTrackEditArguments(changeCover: {
         endEditingImpl?()
-        presentMusicCoverPicker(context: context, hasCover: stateValue.with { $0.pickedCover != nil }, pickerHolder: { holder in
+        let buttonTitle = context.sharedContext.currentPresentationData.with { $0 }.strings.Music_SetAsTrackCover
+        presentMusicCoverPicker(context: context, hasCover: stateValue.with { $0.pickedCover != nil }, buttonTitle: buttonTitle, pickerHolder: { holder in
             avatarPickerHolder = holder
         }, push: { controller in
             pushImpl?(controller)
         }, present: { controller in
             presentImpl?(controller)
-        }, completion: { image in
+        }, completion: { image, _ in
             updateState { state in
                 var state = state
                 state.pickedCover = image

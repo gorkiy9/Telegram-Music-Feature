@@ -49,6 +49,9 @@ public enum ContactMultiselectionControllerMode {
         public var disableChannels: Bool
         public var disableBots: Bool
         public var disableContacts: Bool
+        /// A Select All button in a bottom toolbar; the caller decides what it selects.
+        public var selectAllTitle: String?
+        public var selectAll: (() -> Void)?
         
         public init(
             title: String,
@@ -61,7 +64,9 @@ public enum ContactMultiselectionControllerMode {
             onlyUsers: Bool = false,
             disableChannels: Bool = false,
             disableBots: Bool = false,
-            disableContacts: Bool = false
+            disableContacts: Bool = false,
+            selectAllTitle: String? = nil,
+            selectAll: (() -> Void)? = nil
         ) {
             self.title = title
             self.searchPlaceholder = searchPlaceholder
@@ -74,6 +79,8 @@ public enum ContactMultiselectionControllerMode {
             self.disableChannels = disableChannels
             self.disableBots = disableBots
             self.disableContacts = disableContacts
+            self.selectAllTitle = selectAllTitle
+            self.selectAll = selectAll
         }
     }
     

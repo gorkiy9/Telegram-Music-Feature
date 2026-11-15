@@ -27,6 +27,7 @@ import ChatListSearchFiltersContainerNode
 import MultilineTextComponent
 import HorizontalTabsComponent
 import PeerMessagesMediaPlaylist
+import EmptyStateIndicatorComponent
 
 private enum MusicListEntryId: Hashable {
     case tabSwitch
@@ -74,6 +75,13 @@ private enum MusicListEntryContent {
     case track(MusicTrack, isSelected: Bool?, isFavorite: Bool, isPicked: Bool?)
     case artist(MusicArtist)
     case playlist(MusicPlaylist, subtitle: String)
+}
+
+/// Which empty state a list shows in place of its rows.
+private enum MusicEmptyState: Equatable {
+    case hub
+    case playlists
+    case favorites
 }
 
 /// The tabs of the account's own profile music (folder tabs under the bar).
@@ -216,6 +224,11 @@ final class MusicScreenNode: ASDisplayNode {
     /// Bumped to replay a hub row's icon animation.
     private var hubIconPlayTokens: [MusicSection.Row: Int] = [:]
     private var currentTracks: [MusicTrack] = []
+    /// The list has nothing to show once the music has loaded, so it shows the client's empty state instead:
+    /// the hub with no tracks and no playlists (after Delete All Music, with no source chats), Playlists with none,
+    /// Favorites with no favorite tracks or playlists.
+    private var emptyState: MusicEmptyState?
+    private var emptyStateView: ComponentView<Empty>?
     private var sorting: MusicSorting
     private var navigationScrollOffset: CGFloat = 0.0
     private var validLayout: ContainerViewLayout?
@@ -799,6 +812,7 @@ final class MusicScreenNode: ASDisplayNode {
     private func makeEntries() -> [MusicListEntry] {
         var contents: [(MusicListEntryId, MusicListEntryContent, String?)] = []
         self.currentTracks = []
+        self.emptyState = nil
         if self.isScopedSearchActive {
             return self.makeSearchEntries()
         }
@@ -822,16 +836,32 @@ final class MusicScreenNode: ASDisplayNode {
                 contents.append((.tabSwitch, .tabSwitch(isOn: self.isTabShown), nil))
                 contents.append((.tabFooter, .tabFooter, nil))
             }
-            let tracks = self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false)).filter(self.matchesSearch)
+            let allTracks = self.library.tracks(source: .all, sorting: MusicSorting(key: .dateAdded, ascending: false))
+            if allTracks.isEmpty && self.library.playlists.isEmpty && self.library.isFullyLoaded && self.playlistSearchQuery == nil && !self.displaysTabSwitch && self.picker == nil && self.controller?.attachmentSelection == nil {
+                self.emptyState = .hub
+                break
+            }
+            let tracks = allTracks.filter(self.matchesSearch)
             self.currentTracks = tracks
             contents.append((.hubTiles, .hubTiles(iconPlayTokens: self.hubIconPlayTokens), nil))
             appendPlaybackPanel(tracks)
             contents += tracks.map { (.track($0.message.id), trackContent($0), nil) }
         case .songs, .favorites:
-            self.currentTracks = self.library.tracks(source: self.trackSource, sorting: self.sorting).filter(self.matchesSearch)
+            let sectionTracks = self.library.tracks(source: self.trackSource, sorting: self.sorting)
+            self.currentTracks = sectionTracks.filter(self.matchesSearch)
             if case .favorites = self.section, self.picker == nil {
-                // Favorite playlists are their own category above the tracks (Figma Favorites).
-                contents.append((.favoritePlaylistsTile, .favoritePlaylistsTile, nil))
+                let hasFavoritePlaylists = self.library.playlists.contains(where: { $0.isFavorite })
+                if sectionTracks.isEmpty && !hasFavoritePlaylists && self.library.isFullyLoaded && self.playlistSearchQuery == nil && self.controller?.attachmentSelection == nil {
+                    self.emptyState = .favorites
+                    break
+                }
+                // Favorite playlists are their own category above the tracks (Figma Favorites), hidden while there are none.
+                if hasFavoritePlaylists {
+                    contents.append((.favoritePlaylistsTile, .favoritePlaylistsTile, nil))
+                    if sectionTracks.isEmpty && self.playlistSearchQuery == nil {
+                        contents.append((.emptyInfo, .emptyInfo(self.presentationData.strings.Music_FavoriteTracksAppearHere), nil))
+                    }
+                }
             }
             appendPlaybackPanel(self.currentTracks)
             let byArtist = self.sorting.key == .artist
@@ -891,6 +921,10 @@ final class MusicScreenNode: ASDisplayNode {
             }.map { (.artist($0.name.lowercased()), .artist($0), self.picker == nil ? musicIndexLetter($0.name) : nil) }
         case let .playlists(favoritesOnly):
             let strings = self.presentationData.strings
+            if !favoritesOnly && self.library.playlists.isEmpty && self.playlistChooser == nil && self.picker == nil && self.playlistSearchQuery == nil && self.controller?.attachmentSelection == nil {
+                self.emptyState = .playlists
+                break
+            }
             if self.playlistChooser != nil && self.activeSearchQuery == nil {
                 contents.append((.newPlaylist, .newPlaylist, nil))
             }
@@ -1813,6 +1847,95 @@ final class MusicScreenNode: ASDisplayNode {
             updateOpaqueState: nil
         )
         self.updateIndex(transition: animated ? .animated(duration: 0.3, curve: .easeInOut) : .immediate)
+        self.updateEmptyState(transition: animated ? .easeInOut(duration: 0.3) : .immediate)
+    }
+
+    /// The client's empty state (EmptyStateIndicatorComponent) centred between the bar and the bottom panels:
+    /// on the hub choose the source chats or upload a track of one's own, on Playlists create one, on Favorites
+    /// only what the screen is for.
+    private func updateEmptyState(transition: ComponentTransition) {
+        guard let emptyState = self.emptyState, let layout = self.validLayout, let navigationBarHeight = self.navigationBarView.view?.bounds.height else {
+            if let emptyStateView = self.emptyStateView?.view {
+                self.emptyStateView = nil
+                transition.setAlpha(view: emptyStateView, alpha: 0.0, completion: { [weak emptyStateView] _ in
+                    emptyStateView?.removeFromSuperview()
+                })
+            }
+            return
+        }
+        let strings = self.presentationData.strings
+        var emptyStateTransition = transition
+        let emptyStateView: ComponentView<Empty>
+        if let current = self.emptyStateView {
+            emptyStateView = current
+        } else {
+            emptyStateView = ComponentView()
+            self.emptyStateView = emptyStateView
+            emptyStateTransition = .immediate
+        }
+        let title: String
+        let text: String
+        let actionTitle: String?
+        switch emptyState {
+        case .hub:
+            title = strings.Music_EmptyTitle
+            text = strings.Music_EmptyText
+            actionTitle = strings.Music_ChooseChats
+        case .playlists:
+            title = strings.Music_NoPlaylistsTitle
+            text = strings.Music_NoPlaylistsText
+            actionTitle = strings.Music_CreatePlaylist
+        case .favorites:
+            title = strings.Music_NoFavoritesTitle
+            text = strings.Music_NoFavoritesText
+            actionTitle = nil
+        }
+        let bottomInset = layout.insets(options: []).bottom
+        let size = CGSize(width: layout.size.width - layout.safeInsets.left - layout.safeInsets.right, height: max(0.0, layout.size.height - navigationBarHeight - bottomInset))
+        let _ = emptyStateView.update(
+            transition: emptyStateTransition,
+            component: AnyComponent(EmptyStateIndicatorComponent(
+                context: self.context,
+                theme: self.presentationData.theme,
+                fitToHeight: false,
+                animationName: nil,
+                title: title,
+                text: text,
+                actionTitle: actionTitle,
+                action: { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    switch emptyState {
+                    case .hub:
+                        self.controller?.chooseSourceChats()
+                    case .playlists:
+                        self.controller?.createPlaylist(library: self.library, completion: nil)
+                    case .favorites:
+                        break
+                    }
+                },
+                additionalActionTitle: emptyState == .hub ? strings.Music_UploadTrack : nil,
+                additionalAction: { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    self.controller?.addTrack(library: self.library)
+                }
+            )),
+            environment: {},
+            containerSize: size
+        )
+        if let view = emptyStateView.view {
+            if view.superview == nil {
+                self.view.insertSubview(view, aboveSubview: self.listNode.view)
+                if !transition.animation.isImmediate {
+                    view.alpha = 0.0
+                }
+            }
+            emptyStateTransition.setFrame(view: view, frame: CGRect(origin: CGPoint(x: layout.safeInsets.left, y: navigationBarHeight), size: size))
+            transition.setAlpha(view: view, alpha: 1.0)
+        }
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -2366,6 +2489,7 @@ final class MusicScreenNode: ASDisplayNode {
             self.updateList()
         }
         self.updateIndex(transition: transition)
+        self.updateEmptyState(transition: componentTransition)
         self.updateSelectionPanel(layout: layout, transition: transition)
 
         self.applyNavigationScroll(transition: componentTransition)
@@ -2479,7 +2603,7 @@ final class MusicScreenNode: ASDisplayNode {
             }
             headerAuthor = MusicPlaylistHeaderView.Author(context: self.context, peer: peer, name: self.playlistOwnerName, nameColor: nameColor, suffix: " • " + trackCountText)
         }
-        headerView.update(theme: theme, title: playlist.title, subtitle: trackCountText, author: headerAuthor, cover: self.playlistCoverImage, isExpanded: isExpanded, size: layout.size, statusBarHeight: layout.statusBarHeight ?? 0.0, hasDynamicIsland: layout.deviceMetrics.hasDynamicIsland && !isSheet, offset: offset, transition: headerTransition)
+        headerView.update(theme: theme, title: playlist.title, subtitle: trackCountText, author: headerAuthor, cover: self.playlistCoverImage, coverMarkup: playlist.coverMarkup.flatMap { (self.context, $0) }, isExpanded: isExpanded, size: layout.size, statusBarHeight: layout.statusBarHeight ?? 0.0, hasDynamicIsland: layout.deviceMetrics.hasDynamicIsland && !isSheet, offset: offset, transition: headerTransition)
 
         // The bar's fade comes in as soon as content passes under it, never over the expanded cover.
         let edgeAlpha: CGFloat

@@ -18,6 +18,7 @@ import ContextUI
 import ComponentFlow
 import MultilineTextComponent
 import CheckComponent
+import GlassControls
 
 private struct SearchResultEntry: Identifiable {
     let index: Int
@@ -82,6 +83,8 @@ final class ContactMultiselectionControllerNode: ASDisplayNode {
     private let animationRenderer: MultiAnimationRenderer
     
     private let footerPanelNode: FooterPanelNode?
+    /// Chat selection's Select All toolbar, as item lists draw theirs (glass panel, 44 pt, 20 pt sides).
+    private var selectAllToolbar: ComponentView<Empty>?
     
     private let isPeerEnabled: ((EnginePeer) -> Bool)?
     private let onlyWriteable: Bool
@@ -490,6 +493,50 @@ final class ContactMultiselectionControllerNode: ASDisplayNode {
         
         headerInsets.top += 10.0 + tokenListHeight + 8.0
         insets = headerInsets
+        
+        if case let .chatSelection(chatSelection) = self.mode, let selectAllTitle = chatSelection.selectAllTitle, let selectAll = chatSelection.selectAll {
+            let panelsBottomInset = max(layout.insets(options: [.input]).bottom, 8.0)
+            let toolbarHeight: CGFloat = 44.0
+            let sideInset: CGFloat = 20.0
+            let toolbarFrame = CGRect(x: sideInset + layout.safeInsets.left, y: layout.size.height - panelsBottomInset - toolbarHeight, width: layout.size.width - sideInset * 2.0 - layout.safeInsets.left - layout.safeInsets.right, height: toolbarHeight)
+            let toolbar: ComponentView<Empty>
+            var toolbarTransition = ComponentTransition(transition)
+            if let current = self.selectAllToolbar {
+                toolbar = current
+            } else {
+                toolbar = ComponentView()
+                self.selectAllToolbar = toolbar
+                toolbarTransition = .immediate
+            }
+            let _ = toolbar.update(
+                transition: toolbarTransition,
+                component: AnyComponent(GlassControlPanelComponent(
+                    theme: self.presentationData.theme,
+                    leftItem: nil,
+                    centralItem: GlassControlPanelComponent.Item(
+                        items: [GlassControlGroupComponent.Item(
+                            id: "selectAll",
+                            content: .text(selectAllTitle),
+                            action: {
+                                selectAll()
+                            }
+                        )],
+                        background: .panel
+                    ),
+                    rightItem: nil,
+                    centerAlignmentIfPossible: true
+                )),
+                environment: {},
+                containerSize: toolbarFrame.size
+            )
+            if let toolbarView = toolbar.view {
+                if toolbarView.superview == nil {
+                    self.view.addSubview(toolbarView)
+                }
+                toolbarTransition.setFrame(view: toolbarView, frame: toolbarFrame)
+            }
+            insets.bottom = max(insets.bottom, panelsBottomInset + toolbarHeight + 8.0)
+        }
         
         if let footerPanelNode = self.footerPanelNode {
             var count = 0
