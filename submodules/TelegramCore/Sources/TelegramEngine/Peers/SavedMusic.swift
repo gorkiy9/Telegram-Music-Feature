@@ -89,6 +89,10 @@ func _internal_savedMusicIds(postbox: Postbox) -> Signal<Set<Int64>?, NoError> {
 }
 
 func _internal_keepSavedMusicIdsUpdated(postbox: Postbox, network: Network, accountPeerId: EnginePeer.Id) -> Signal<Never, NoError> {
+    if isMusicDemoBuild {
+        // The demo's profile music is local (`_internal_seedMusicDemoSavedMusic`); the test server's list would replace it.
+        return .complete()
+    }
     let updateSignal = _internal_savedMusicIds(postbox: postbox)
     |> take(1)
     |> mapToSignal { list -> Signal<Never, NoError> in
@@ -143,19 +147,14 @@ func _internal_addSavedMusic(account: Account, file: FileMediaReference, afterFi
     }
     var flags: Int32 = 0
     var afterId: Api.InputDocument?
-    if let afterFile {
+    if let afterFile, !isMusicDemoBuild {
         guard let resource = afterFile.media.resource as? CloudDocumentMediaResource else {
             return .fail(.generic)
         }
         flags = 1 << 1
         afterId = .inputDocument(.init(id: resource.fileId, accessHash: resource.accessHash, fileReference: Buffer(data: resource.fileReference)))
     }
-    return revalidatedMusic(account: account, file: file, signal: { resource in
-        return account.network.request(Api.functions.account.saveMusic(flags: flags, id: .inputDocument(.init(id: resource.fileId, accessHash: resource.accessHash, fileReference: Buffer(data: resource.fileReference))), afterId: afterId))
-    })
-    |> mapError { _ -> AddSavedMusicError in .generic }
-    |> mapToSignal { result -> Signal<Never, AddSavedMusicError> in
-        guard case .boolTrue = result else { return .fail(.generic) }
+    let applyLocally: () -> Signal<Never, AddSavedMusicError> = {
         return account.postbox.transaction { transaction in
             let savedIds = transaction.getPreferencesEntry(key: PreferencesKeys.savedMusicIds())?.get(SavedMusicIdsList.self)
             var firstFile: TelegramMediaFile?
@@ -182,15 +181,22 @@ func _internal_addSavedMusic(account: Account, file: FileMediaReference, afterFi
         |> castError(AddSavedMusicError.self)
         |> ignoreValues
     }
+    if isMusicDemoBuild {
+        // The demo's files are local: the profile list is kept on this device only.
+        return applyLocally()
+    }
+    return revalidatedMusic(account: account, file: file, signal: { resource in
+        return account.network.request(Api.functions.account.saveMusic(flags: flags, id: .inputDocument(.init(id: resource.fileId, accessHash: resource.accessHash, fileReference: Buffer(data: resource.fileReference))), afterId: afterId))
+    })
+    |> mapError { _ -> AddSavedMusicError in .generic }
+    |> mapToSignal { result -> Signal<Never, AddSavedMusicError> in
+        guard case .boolTrue = result else { return .fail(.generic) }
+        return applyLocally()
+    }
 }
 
 func _internal_removeSavedMusic(account: Account, file: FileMediaReference) -> Signal<Never, NoError> {
-    return revalidatedMusic(account: account, file: file, signal: { resource in
-        return account.network.request(Api.functions.account.saveMusic(flags: 1 << 0, id: .inputDocument(.init(id: resource.fileId, accessHash: resource.accessHash, fileReference: Buffer(data: resource.fileReference))), afterId: nil))
-    })
-    |> `catch` { _ -> Signal<Api.Bool, NoError> in .complete() }
-    |> mapToSignal { result -> Signal<Never, NoError> in
-        guard case .boolTrue = result else { return .complete() }
+    let applyLocally: () -> Signal<Never, NoError> = {
         return account.postbox.transaction { transaction in
             let savedIds = transaction.getPreferencesEntry(key: PreferencesKeys.savedMusicIds())?.get(SavedMusicIdsList.self)
             var nextFile: TelegramMediaFile?
@@ -214,6 +220,17 @@ func _internal_removeSavedMusic(account: Account, file: FileMediaReference) -> S
             })
         }
         |> ignoreValues
+    }
+    if isMusicDemoBuild {
+        return applyLocally()
+    }
+    return revalidatedMusic(account: account, file: file, signal: { resource in
+        return account.network.request(Api.functions.account.saveMusic(flags: 1 << 0, id: .inputDocument(.init(id: resource.fileId, accessHash: resource.accessHash, fileReference: Buffer(data: resource.fileReference))), afterId: nil))
+    })
+    |> `catch` { _ -> Signal<Api.Bool, NoError> in .complete() }
+    |> mapToSignal { result -> Signal<Never, NoError> in
+        guard case .boolTrue = result else { return .complete() }
+        return applyLocally()
     }
 }
 
@@ -250,6 +267,22 @@ private func entryId(peerId: EnginePeer.Id) -> ItemCacheEntryId {
     let cacheKey = ValueBoxKey(length: 8)
     cacheKey.setInt64(0, value: peerId.toInt64())
     return ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.cachedProfileSavedMusic, key: cacheKey)
+}
+
+/// The Music demo build: each profile's music is this cached list, which `ProfileSavedMusicContext` reads instead of
+/// asking the server, and the account's saved ids match it.
+func _internal_seedMusicDemoSavedMusic(transaction: Transaction, accountPeerId: PeerId, savedMusic: [PeerId: [TelegramMediaFile]]) {
+    for (peerId, files) in savedMusic {
+        if let entry = CodableEntry(CachedProfileSavedMusic(files: files, count: Int32(clamping: files.count))) {
+            transaction.putItemCacheEntry(id: entryId(peerId: peerId), entry: entry)
+        }
+        if peerId == accountPeerId {
+            transaction.setPreferencesEntry(key: PreferencesKeys.savedMusicIds(), value: PreferencesEntry(SavedMusicIdsList(items: files.map(\.fileId.id))))
+            transaction.updatePeerCachedData(peerIds: Set([peerId]), update: { _, cachedData -> CachedPeerData? in
+                return ((cachedData as? CachedUserData) ?? CachedUserData()).withUpdatedSavedMusic(files.first)
+            })
+        }
+    }
 }
 
 public final class ProfileSavedMusicContext {
@@ -314,6 +347,24 @@ public final class ProfileSavedMusicContext {
         let offset = reload || self.needsFirstPageRetry ? 0 : self.nextOffset
         
         guard case .ready(true) = dataState, self.pendingMutations.isEmpty else {
+            return
+        }
+        if isMusicDemoBuild {
+            // The demo's profiles are local: the cached list is the whole list.
+            self.requestGeneration &+= 1
+            let generation = self.requestGeneration
+            self.cacheReadDisposable.set((postbox.transaction { transaction -> CachedProfileSavedMusic? in
+                return transaction.retrieveItemCacheEntry(id: entryId(peerId: peerId))?.get(CachedProfileSavedMusic.self)
+            } |> deliverOn(self.queue)).start(next: { [weak self] cached in
+                guard let self, self.requestGeneration == generation else {
+                    return
+                }
+                self.files = cached?.files ?? []
+                self.count = Int32(clamping: self.files.count)
+                self.needsFirstPageRetry = false
+                self.dataState = .ready(canLoadMore: false)
+                self.pushState()
+            }))
             return
         }
         self.requestGeneration &+= 1

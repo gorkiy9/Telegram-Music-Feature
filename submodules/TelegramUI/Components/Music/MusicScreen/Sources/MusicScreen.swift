@@ -108,6 +108,11 @@ public final class MusicScreen: ViewController {
 
     public convenience init(context: AccountContext, mode: Mode) {
         self.init(context: context, mode: mode, section: .hub, library: nil)
+        if isMusicDemoBuild {
+            // The demo build's chats and music, written before anything shows (see `MusicDemo`).
+            let _ = MusicDemo.prepare(context: context).start()
+            return
+        }
         // The section's tab exists from launch: put the local test chat for forwarded tracks and playlists in the chat
         // list (concept only, nothing about it reaches the server).
         let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
@@ -764,22 +769,13 @@ public final class MusicScreen: ViewController {
     }
 
     private func presentAddedToast(success: Bool) {
-        let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
-        let strings = presentationData.strings
-        self.present(UndoOverlayController(
-            presentationData: presentationData,
-            content: .universalImage(
-                image: generateTintedImage(image: UIImage(bundleImageName: "Peer Info/SavedMusic"), color: .white)!,
-                size: nil,
-                title: nil,
-                text: success ? strings.MediaPlayer_SavedMusic_AddedToProfile : strings.Login_UnknownError,
-                customUndoText: nil,
-                timeout: 3.0
-            ),
-            action: { _ in
-                return true
-            }
-        ), in: .current)
+        let strings = self.presentationData.strings
+        if success {
+            let toast = musicLibraryToast(strings: strings, isInMusic: true, count: 1)
+            self.presentToast(text: toast.text, iconName: toast.iconName)
+        } else {
+            self.presentToast(text: strings.Login_UnknownError, iconName: "Chat/Context Menu/Info")
+        }
     }
 
     private func currentLibrary() -> MusicLibrary {

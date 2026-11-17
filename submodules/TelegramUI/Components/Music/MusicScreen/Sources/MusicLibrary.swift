@@ -313,6 +313,7 @@ final class MusicLibrary {
     private let fileListsDisposable = MetaDisposable()
     private let sourcesDisposable = MetaDisposable()
     private let removeAllDisposable = MetaDisposable()
+    private let demoPrepareDisposable = MetaDisposable()
     /// The chats music is taken from; nil for all of them.
     private var sourcePeerIds: Set<EnginePeer.Id>? {
         didSet { self.cachedAllTracks = nil }
@@ -610,6 +611,23 @@ final class MusicLibrary {
         let now = Int32(Date().timeIntervalSince1970)
         self.playlists = [MusicPlaylist(id: 0, title: playlistTitle, description: "", isFavorite: false, trackIds: [], dateAdded: now, dateUpdated: now)]
 
+        if isMusicDemoBuild {
+            // The demo's chats and library state are written first, then read as usual.
+            self.demoPrepareDisposable.set((MusicDemo.prepare(context: context)
+            |> deliverOnMainQueue).start(completed: { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.savedMusicContext.reload()
+                self.startLoading()
+            }))
+        } else {
+            self.startLoading()
+        }
+    }
+
+    private func startLoading() {
+        let context = self.context
         // The saved-music playlist already turns the list into messages; rows and playlist then share their ids.
         let savedLocation = PeerMessagesPlaylistLocation.savedMusic(context: self.savedMusicContext, at: 0, canReorder: false)
         if case let .custom(messages, _, _, _, _) = savedLocation.effectiveLocation(context: context) {
@@ -956,6 +974,7 @@ final class MusicLibrary {
         self.fileListsDisposable.dispose()
         self.sourcesDisposable.dispose()
         self.removeAllDisposable.dispose()
+        self.demoPrepareDisposable.dispose()
         self.recentSearchesDisposable.dispose()
         self.playlistsDisposable.dispose()
         self.trackEditsDisposable.dispose()
@@ -966,7 +985,14 @@ final class MusicLibrary {
     // They live as long as the library: the API has nowhere to keep them.
 
     func playlist(id: Int) -> MusicPlaylist? {
-        return self.playlists.first(where: { $0.id == id })
+        if let playlist = self.playlists.first(where: { $0.id == id }) {
+            return playlist
+        }
+        if isMusicDemoBuild {
+            // A demo friend's playlist shared into a chat: not the account's, so it is not in the list.
+            return MusicDemo.foreignPlaylist(id: id, library: self)
+        }
+        return nil
     }
 
     @discardableResult
@@ -1314,6 +1340,10 @@ final class MusicLibrary {
         guard self.chatCanLoadMore, !self.isLoadingChatMessages else {
             return
         }
+        if isMusicDemoBuild {
+            self.loadDemoChatMusic()
+            return
+        }
         self.isLoadingChatMessages = true
         self.chatLoadDisposable.set((self.chatMusicSearch(state: self.chatSearchState)
         |> deliverOnMainQueue).start(next: { [weak self] result, state in
@@ -1331,6 +1361,12 @@ final class MusicLibrary {
 
     /// Puts tracks that arrived in chats since the last load on top, keeping the pages already loaded.
     func refreshChatMusic() {
+        if isMusicDemoBuild {
+            if !self.chatCanLoadMore {
+                self.loadDemoChatMusic()
+            }
+            return
+        }
         guard self.chatSearchState != nil else {
             return
         }
@@ -1345,6 +1381,21 @@ final class MusicLibrary {
                 self.chatMessages = newMessages + self.chatMessages
                 self.notifyUpdated()
             }
+        }))
+    }
+
+    /// The demo build has no server search: its chats are local, and their music is read from the device.
+    private func loadDemoChatMusic() {
+        self.isLoadingChatMessages = true
+        self.chatLoadDisposable.set((self.context.engine.messages.musicDemoChatMusic()
+        |> deliverOnMainQueue).start(next: { [weak self] messages in
+            guard let self else {
+                return
+            }
+            self.isLoadingChatMessages = false
+            self.chatMessages = messages
+            self.chatCanLoadMore = false
+            self.notifyUpdated()
         }))
     }
 
@@ -1403,44 +1454,63 @@ final class MusicLibrary {
         |> deliverOnMainQueue
     }
 
-    /// Uploads a prepared audio file with the title, artist and cover from the new track screen and saves it to the profile,
-    /// as the music player's Add does. A picked cover goes up as the file's thumbnail.
+    /// Adds a prepared audio file to Music with the title, artist and cover from the new track screen. Nothing goes
+    /// to the server or the profile: the file and its cover are copied into the media box under local ids, so the
+    /// track keeps playing after the picked file is gone. Putting it in the profile stays a separate action.
     func addTrack(file preparedFile: TelegramMediaFile, title: String, artist: String, coverData: Data?, completion: @escaping (Bool) -> Void) {
-        let context = self.context
-        var file = musicFile(preparedFile, title: title, artist: artist, cover: nil)
-        if coverData != nil {
-            file = file.withUpdatedPreviewRepresentations([])
+        let resources = self.context.engine.resources
+        let completeData: (EngineMediaResource) -> Signal<EngineMediaResource.ResourceData, NoError> = { resource in
+            return Signal { subscriber in
+                let fetch = resources.fetchedResource(resource: resource).start()
+                let data = (resources.data(resource: resource)
+                |> filter { $0.isComplete }
+                |> take(1)).start(next: { data in
+                    subscriber.putNext(data)
+                    subscriber.putCompletion()
+                })
+                return ActionDisposable {
+                    fetch.dispose()
+                    data.dispose()
+                }
+            }
         }
-        let uploadDisposable = MetaDisposable()
-        self.uploadDisposables.add(uploadDisposable)
-        uploadDisposable.set((standaloneUploadedFile(
-            postbox: context.account.postbox,
-            network: context.account.network,
-            peerId: context.account.peerId,
-            text: "",
-            source: .resource(.media(media: .standalone(media: file), resource: file.resource)),
-            thumbnailData: coverData ?? file.immediateThumbnailData,
-            mimeType: file.mimeType,
-            attributes: file.attributes,
-            hintFileIsLarge: false
-        )
-        |> deliverOnMainQueue).start(next: { [weak self] value in
-            guard let self, case let .result(result) = value, case let .media(resultMedia) = result, let resultFile = resultMedia.media as? TelegramMediaFile else {
+        let artwork: Signal<Data?, NoError>
+        if let coverData {
+            artwork = .single(coverData)
+        } else if let thumbnail = preparedFile.previewRepresentations.first {
+            artwork = completeData(EngineMediaResource(thumbnail.resource))
+            |> map { data -> Data? in
+                return try? Data(contentsOf: URL(fileURLWithPath: data.path))
+            }
+        } else {
+            artwork = .single(nil)
+        }
+        var didFinish = false
+        let _ = (combineLatest(completeData(EngineMediaResource(preparedFile.resource)), artwork)
+        |> take(1)
+        |> timeout(60.0, queue: Queue.mainQueue(), alternate: .complete())
+        |> deliverOnMainQueue).start(next: { [weak self] data, artworkData in
+            didFinish = true
+            guard let self, data.availableSize > 0 else {
+                completion(false)
                 return
             }
-            context.engine.resources.moveResourceData(from: EngineMediaResource.Id(file.resource.id), to: EngineMediaResource.Id(resultFile.resource.id), synchronous: true)
-            uploadDisposable.set((context.engine.peers.addSavedMusic(file: .standalone(media: resultFile))
-            |> deliverOnMainQueue).start(error: { [weak self] _ in
-                self?.uploadDisposables.remove(uploadDisposable)
+            let resource = LocalFileMediaResource(fileId: Int64.random(in: Int64.min ... Int64.max), size: data.availableSize)
+            resources.copyResourceData(from: EngineMediaResource.Id(preparedFile.resource.id), to: EngineMediaResource.Id(resource.id), synchronous: true)
+            var cover: TelegramMediaImageRepresentation?
+            if let artworkData {
+                let coverResource = LocalFileMediaResource(fileId: Int64.random(in: Int64.min ... Int64.max))
+                resources.storeResourceData(id: EngineMediaResource.Id(coverResource.id), data: artworkData, synchronous: true)
+                cover = TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: 600, height: 600), resource: coverResource, progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
+            }
+            let file = musicFile(preparedFile.withUpdatedResource(resource).withUpdatedSize(data.availableSize).withUpdatedPreviewRepresentations([]), title: title, artist: artist, cover: cover)
+            self.addToMusic(file: file)
+            completion(true)
+        }, completed: {
+            if !didFinish {
                 completion(false)
-            }, completed: { [weak self] in
-                self?.uploadDisposables.remove(uploadDisposable)
-                completion(true)
-            }))
-        }, error: { [weak self] _ in
-            self?.uploadDisposables.remove(uploadDisposable)
-            completion(false)
-        }))
+            }
+        })
     }
 
     /// Plays in the order of the list the track was started from. The player reads the queue again at every
@@ -1798,4 +1868,42 @@ private func musicMergedRecents<T: Hashable>(_ front: [T], _ rest: [T]) -> [T] {
         }
     }
     return result
+}
+
+/// The demo build's library state, written over whatever an earlier take left: favorites, tracks out of Music,
+/// playlists, the hidden tab and empty edits, additions, recent searches, sources and profile dates.
+func musicDemoWriteLibraryState(context: AccountContext, playlists: [MusicDemo.PlaylistSpec], favoriteFileIds: [Int64], removedFileIds: [Int64], tabIsShown: Bool) -> Signal<Never, NoError> {
+    let now = Int32(Date().timeIntervalSince1970)
+    let stored = MusicStoredPlaylists(playlists: playlists.enumerated().map { index, playlist in
+        return MusicStoredPlaylists.Playlist(
+            id: Int32(playlist.id),
+            title: playlist.title,
+            description: playlist.description,
+            isFavorite: playlist.isFavorite,
+            isInProfile: false,
+            fileIds: playlist.fileIds.map { MusicStoredPlaylists.FileId(namespace: Namespaces.Media.LocalFile, id: $0) },
+            cover: playlist.coverFileId.flatMap { MusicStoredPlaylists.Cover(fileId: $0, width: 600, height: 600) },
+            coverEmoji: nil,
+            dateAdded: now - Int32(playlists.count - index) * 86400,
+            dateUpdated: now - Int32(playlists.count - index) * 86400
+        )
+    })
+    let collectionId = ApplicationSpecificItemCacheCollectionId.music
+    let itemCache = context.engine.itemCache
+    let writes: [Signal<Never, NoError>] = [
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.favorites.buffer, item: MusicFileIdList(fileIds: favoriteFileIds)),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.removed.buffer, item: MusicFileIdList(fileIds: removedFileIds)),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.tabSettings.buffer, item: MusicTabSettings(isShown: tabIsShown)),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.playlists.buffer, item: stored),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.trackEdits.buffer, item: MusicStoredTrackEdits(edits: [])),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.addedFiles.buffer, item: MusicStoredAddedFiles(files: [])),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.recentSearches.buffer, item: MusicStoredRecentSearches(playlistIds: [], artists: [], fileIds: [])),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.sources.buffer, item: MusicSourceSettings.default),
+        itemCache.put(collectionId: collectionId, id: MusicCacheKey.profileDates.buffer, item: MusicStoredProfileDates(tracks: [], playlists: []))
+    ]
+    return combineLatest(writes.map { write -> Signal<Void, NoError> in
+        return write |> map { _ -> Void in } |> then(.single(Void()))
+    })
+    |> take(1)
+    |> ignoreValues
 }

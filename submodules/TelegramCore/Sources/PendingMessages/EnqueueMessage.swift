@@ -760,7 +760,11 @@ private func opportunisticallyTransformOutgoingMedia(network: Network, postbox: 
 
 public func enqueueMessages(account: Account, peerId: PeerId, messages: [EnqueueMessage]) -> Signal<[MessageId?], NoError> {
     let signal: Signal<[(Bool, EnqueueMessage)], NoError>
-    if let transformOutgoingMessageMedia = account.transformOutgoingMessageMedia {
+    // The local Music chats (test chat, demo build) store messages as sent: their media needs no upload preparation,
+    // which in the offline demo build would wait for a network that never comes.
+    if isMusicTestChat(peerId) {
+        signal = .single(messages.map { (false, $0) })
+    } else if let transformOutgoingMessageMedia = account.transformOutgoingMessageMedia {
         signal = opportunisticallyTransformOutgoingMedia(network: account.network, postbox: account.postbox, transformOutgoingMessageMedia: transformOutgoingMessageMedia, messages: messages, userInteractive: true)
     } else {
         signal = .single(messages.map { (false, $0) })

@@ -16,6 +16,7 @@ import Photos
 import AvatarEditorScreen
 import CameraScreen
 import MediaEditorScreen
+import MediaPickerUI
 
 private final class MusicPlaylistEditArguments {
     let context: AccountContext
@@ -584,7 +585,7 @@ func musicPlaylistCover(context: AccountContext, image: UIImage) -> TelegramMedi
     return TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: 640, height: 640), resource: resource, progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
 }
 
-/// The avatar picker of a new channel: gallery, camera or an emoji, then the round crop. A video keeps only its cover frame.
+/// The avatar picker with the subtitle «Set new cover»: gallery, camera or an emoji, then the round crop. A video keeps only its cover frame.
 /// Completes with the picked image, or nil when the cover is deleted, and the emoji markup when an animated emoji or
 /// sticker was picked. `buttonTitle` replaces the emoji editor's «Set as Channel Photo».
 func presentMusicCoverPicker(context: AccountContext, hasCover: Bool, buttonTitle: String, pickerHolder: @escaping (Any?) -> Void, push: @escaping (ViewController) -> Void, present: @escaping (ViewController) -> Void, completion: @escaping (UIImage?, TelegramMediaImage.EmojiMarkup?) -> Void) {
@@ -596,9 +597,9 @@ func presentMusicCoverPicker(context: AccountContext, hasCover: Bool, buttonTitl
     }
 
     var dismissPickerImpl: (() -> Void)?
-    let (mainController, holder) = context.sharedContext.makeAvatarMediaPickerScreen(context: context, peerType: .channel, getSourceRect: { return nil }, canDelete: hasCover, performDelete: {
+    let (mainController, holder) = avatarMediaPickerController(context: context, peerType: .user(isBot: false), getSourceRect: { return nil }, canDelete: hasCover, performDelete: {
         completion(nil, nil)
-    }, completion: { result, transitionView, transitionRect, transitionImage, fromCamera, _, cancelled in
+    }, subtitle: context.sharedContext.currentPresentationData.with { $0 }.strings.Music_CoverPickerSubtitle, completion: { result, transitionView, transitionRect, transitionImage, fromCamera, _, cancelled in
         pickerHolder(nil)
 
         let subject: Signal<MediaEditorScreenImpl.Subject?, NoError>

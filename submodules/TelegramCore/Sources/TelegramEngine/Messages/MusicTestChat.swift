@@ -8,7 +8,11 @@ import SwiftSignalKit
 public let musicTestChatPeerId = PeerId(namespace: Namespaces.Peer.CloudUser, id: PeerId.Id._internalFromInt64Value(1_099_511_627_000))
 
 /// Debug builds only: a release build never creates the chat, and the history and send paths stay untouched.
+/// The demo build's chats (`isMusicDemoPeer`) are local the same way, in any configuration.
 func isMusicTestChat(_ peerId: PeerId) -> Bool {
+    if isMusicDemoPeer(peerId) {
+        return true
+    }
     #if DEBUG
     return peerId == musicTestChatPeerId
     #else

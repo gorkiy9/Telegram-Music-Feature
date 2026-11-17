@@ -100,6 +100,11 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
             self?.updateState(state: state)
         }).strict()
         
+        if isMusicDemoBuild {
+            // The Music demo build has no sign-in: it creates its local account at once.
+            let _ = musicDemoSignInOffline(accountManager: sharedContext.accountManager, account: account).start()
+        }
+
         self.applicationStateDisposable = (self.sharedContext.applicationBindings.applicationIsActive
         |> deliverOnMainQueue).start(next: { [weak self] isActive in
             guard let self else {

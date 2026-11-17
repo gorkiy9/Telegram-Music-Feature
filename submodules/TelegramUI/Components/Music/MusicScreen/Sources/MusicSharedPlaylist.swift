@@ -68,7 +68,7 @@ func musicSharePlaylistSubject(context: AccountContext, playlist: MusicPlaylist,
                 for peerId in peerIds {
                     let threadId = threadIds[peerId]
                     var messages: [EnqueueMessage] = []
-                    if peerId == musicTestChatPeerId {
+                    if musicSendsPlaylistBubble(to: peerId) {
                         let webpage = musicSharedPlaylistWebpage(playlist: playlist, files: files, ownerName: ownerName)
                         messages.append(.message(text: text, attributes: [], inlineStickers: [:], mediaReference: .standalone(media: webpage), threadId: threadId, replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: nil, correlationId: nil, bubbleUpEmojiOrStickersets: []))
                     } else {
@@ -88,7 +88,9 @@ func musicSharePlaylistSubject(context: AccountContext, playlist: MusicPlaylist,
                     }
                     signals.append(enqueueMessages(account: context.account, peerId: peerId, messages: messages))
                 }
+                // The enqueue signals can stay open after the messages are stored: one value is the send.
                 return combineLatest(signals)
+                |> take(1)
                 |> castError(ShareControllerError.self)
                 |> mapToSignal { _ -> Signal<ShareControllerExternalStatus, ShareControllerError> in
                     return .complete()
@@ -140,7 +142,9 @@ func musicShareTracksSubject(context: AccountContext, tracks: [MusicTrack]) -> S
                     }
                     signals.append(enqueueMessages(account: context.account, peerId: peerId, messages: messages))
                 }
+                // The enqueue signals can stay open after the messages are stored: one value is the send.
                 return combineLatest(signals)
+                |> take(1)
                 |> castError(ShareControllerError.self)
                 |> mapToSignal { _ -> Signal<ShareControllerExternalStatus, ShareControllerError> in
                     return .complete()

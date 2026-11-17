@@ -301,6 +301,8 @@ public enum AccountResult {
 }
 
 public func accountWithId(accountManager: AccountManager<TelegramAccountManagerTypes>, networkArguments: NetworkInitializationArguments, id: AccountRecordId, encryptionParameters: ValueBoxEncryptionParameters, supplementary: Bool, isSupportUser: Bool, rootPath: String, beginWithTestingEnvironment: Bool, backupData: AccountBackupData?, auxiliaryMethods: AccountAuxiliaryMethods, shouldKeepAutoConnection: Bool = true) -> Signal<AccountResult, NoError> {
+    // The Music demo build signs in to the test servers only, so no real account can show up in the demo video.
+    let beginWithTestingEnvironment = beginWithTestingEnvironment || isMusicDemoBuild
     let path = "\(rootPath)/\(accountRecordIdPathName(id))"
     
     let postbox = openPostbox(
@@ -1287,6 +1289,10 @@ public class Account {
     
     private let networkStateValue = Promise<AccountNetworkState>(.waitingForNetwork)
     public var networkState: Signal<AccountNetworkState, NoError> {
+        if isMusicDemoBuild {
+            // The offline demo never connects; its screens show the online state.
+            return .single(.online(proxy: nil))
+        }
         return self.networkStateValue.get()
     }
     

@@ -342,7 +342,12 @@ final class MusicScreenNode: ASDisplayNode {
                 self?.openPlaylistAuthor()
             }
 
-            self.playlistOwnerDisposable = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: context.account.peerId))
+            // A demo friend's playlist from a chat is hers; any other playlist is the account's.
+            var ownerPeerId = context.account.peerId
+            if case let .playlist(playlistId) = self.section, let foreignOwnerId = MusicDemo.ownerPeerId(playlistId: playlistId) {
+                ownerPeerId = foreignOwnerId
+            }
+            self.playlistOwnerDisposable = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: ownerPeerId))
             |> deliverOnMainQueue).start(next: { [weak self] peer in
                 guard let self, let peer else {
                     return

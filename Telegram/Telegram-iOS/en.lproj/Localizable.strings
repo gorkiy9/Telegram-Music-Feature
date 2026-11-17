@@ -17494,3 +17494,4 @@ Error: %8$@";
 "Music.AddToMusic" = "Add to Music";
 "Music.SetAsPlaylistCover" = "Set as Playlist Cover";
 "Music.SetAsTrackCover" = "Set as Track Cover";
+"Music.CoverPickerSubtitle" = "Set new cover";

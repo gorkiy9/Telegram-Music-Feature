@@ -590,6 +590,8 @@ public final class ShareScreen: ViewControllerComponentContainer {
             if case .done = status {
                 self.uploadCompleted = true
                 self.sender.enqueued?(self.enqueuingPeerIds, [])
+                HapticFeedback().success()
+                self.close()
             }
             return
         }

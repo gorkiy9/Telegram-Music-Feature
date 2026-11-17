@@ -375,6 +375,14 @@ public final class MediaPickerScreenImpl: ViewController, MediaPickerScreen, Att
     public var presentFilePicker: () -> Void = {}
     public var openAvatarEditor: () -> Void = {}
     public var showsAvatarEmojiEntry = true
+    /// Replaces the avatar picker's «Set new … photo» subtitle (e.g. a music cover picker).
+    public var avatarSubtitle: String? {
+        didSet {
+            if let avatarSubtitle = self.avatarSubtitle, case .assets(_, .createAvatar) = self.subject {
+                self.titleView.subtitle = avatarSubtitle
+            }
+        }
+    }
     
     private var completed = false {
         didSet {
@@ -2763,6 +2771,9 @@ public final class MediaPickerScreenImpl: ViewController, MediaPickerScreen, Att
                     case .community:
                         self.titleView.subtitle = presentationData.strings.MediaPicker_SetNewCommunityPhoto
                     }
+                    if let avatarSubtitle = self.avatarSubtitle {
+                        self.titleView.subtitle = avatarSubtitle
+                    }
                     self.titleView.isEnabled = true
                 case .story:
                     self.titleView.title = presentationData.strings.MediaPicker_Recents
@@ -4807,6 +4818,7 @@ public func avatarMediaPickerController(
     performDelete: @escaping () -> Void,
     isDark: Bool = false,
     allowsEmojiAvatar: Bool = true,
+    subtitle: String? = nil,
     completion: @escaping (Any?, UIView?, CGRect, UIImage?, Bool, @escaping (Bool?) -> (UIView, CGRect)?, @escaping () -> Void) -> Void,
     dismissed: @escaping () -> Void
 ) -> (controller: ViewController?, holder: Any?) {
@@ -4931,6 +4943,7 @@ public func avatarMediaPickerController(
                 }
             )
             mediaPickerController.showsAvatarEmojiEntry = allowsEmojiAvatar
+            mediaPickerController.avatarSubtitle = subtitle
             mediaPickerController.customSelection = { controller, result in
                 if let result = result as? PHAsset {
                     controller.updateHiddenMediaId(result.localIdentifier)

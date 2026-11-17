@@ -33,6 +33,7 @@ swift_library(
         "//submodules/ContextUI",
         "//submodules/ICloudResources",
         "//submodules/LegacyMediaPickerUI",
+        "//submodules/MediaPickerUI",
         "//submodules/UndoUI",
         "//submodules/PromptUI",
         "//submodules/TelegramUI/Components/ChatListHeaderComponent",

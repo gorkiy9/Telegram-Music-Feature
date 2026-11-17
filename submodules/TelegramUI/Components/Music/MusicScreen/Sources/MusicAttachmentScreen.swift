@@ -243,7 +243,7 @@ public final class MusicAttachmentScreen: ViewController, AttachmentContainable 
             let ownerName = accountPeer?.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
             for playlist in playlists {
                 let playlistTracks = library.tracks(of: playlist)
-                if peerId == musicTestChatPeerId {
+                if musicSendsPlaylistBubble(to: peerId) {
                     let webpage = musicSharedPlaylistWebpage(playlist: playlist, files: playlistTracks.compactMap(\.file), ownerName: ownerName)
                     groups.append([.standalone(media: webpage)])
                 } else {

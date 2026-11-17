@@ -628,7 +628,10 @@ func initializedNetwork(accountId: AccountRecordId, arguments: NetworkInitializa
             }
             
             for (id, ips) in seedAddressList {
-                context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: ips.map { MTDatacenterAddress(ip: $0, port: 443, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }))
+                // The Music demo build is offline: every datacenter points at a closed local port, so nothing ever
+                // reaches a server and no server can sign the local demo account out.
+                let addresses = isMusicDemoBuild ? ["127.0.0.1"] : ips
+                context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: addresses.map { MTDatacenterAddress(ip: $0, port: isMusicDemoBuild ? 9 : 443, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }))
             }
             
             context.keychain = keychain
@@ -659,7 +662,9 @@ func initializedNetwork(accountId: AccountRecordId, arguments: NetworkInitializa
             #endif
             
             if !supplementary {
+                if !isMusicDemoBuild {
                 context.setDiscoverBackupAddressListSignal(MTBackupAddressSignals.fetchBackupIps(testingEnvironment, currentContext: context, additionalSource: wrappedAdditionalSource, phoneNumber: phoneNumber, mainDatacenterId: datacenterId))
+                }
                 let externalRequestVerificationStream = arguments.externalRequestVerificationStream
                 context.setExternalRequestVerification({ nonce in
                     return MTSignal(generator: { subscriber in
@@ -702,6 +707,10 @@ func initializedNetwork(accountId: AccountRecordId, arguments: NetworkInitializa
             #endif*/
             
             var rustDisabledReason = networkEngineRustDisabledReason(appConfiguration: appConfiguration, engineState: networkEngine.state, appVersion: arguments.appVersion, timestamp: Int32(Date().timeIntervalSince1970))
+            if isMusicDemoBuild && rustDisabledReason == nil {
+                // The offline demo relies on MtProtoKit's address list above.
+                rustDisabledReason = "music demo build"
+            }
             #if os(macOS)
             if rustDisabledReason == nil {
                 rustDisabledReason = networkLivenessDisabledReason()
