@@ -2471,6 +2471,11 @@ final class MusicScreenNode: ASDisplayNode {
                 insets.top += self.controller?.globalControlPanelsContextState?.mediaPlayback != nil ? 13.0 : 3.0
             }
         }
+        if !isSearching && self.playlistChooser != nil {
+            // New Playlist has no top inset of its own: like Play/Shuffle it keeps 16 pt from the player or the
+            // search field (the bar ends 3 pt below the player; the field reaches 3 pt past the bar's end).
+            insets.top += self.controller?.globalControlPanelsContextState?.mediaPlayback != nil ? 13.0 : 19.0
+        }
         if !isSearching && self.hasProfileTabs {
             // The profile's tabs are the bar's lowest part (under them only the player, in the same glass, which ends
             // 3 pt above the bar's end): the first block keeps 16 pt from that glass, its own top inset.
