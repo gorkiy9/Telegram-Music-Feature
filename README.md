@@ -1,3 +1,5 @@
+> **Fork note.** This fork adds a Music section to Telegram iOS (concept implemented as working code, behind a local flag, no server changes). See [submodules/TelegramUI/Components/Music/README.md](submodules/TelegramUI/Components/Music/README.md).
+
 # Telegram iOS Source Code Compilation Guide
 
 We welcome all developers to use our API and source code to create applications on our platform.
