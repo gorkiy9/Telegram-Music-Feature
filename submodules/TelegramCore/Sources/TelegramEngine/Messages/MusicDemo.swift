@@ -36,6 +36,8 @@ public func isMusicDemoPeer(_ peerId: EnginePeer.Id) -> Bool {
 public struct MusicDemoSeed {
     public enum PeerKind {
         case user(firstName: String, lastName: String?, isInChatList: Bool)
+        /// A bot's chat: in the chat list, drawn as a bot (no last seen, bot profile).
+        case bot(name: String)
         case group(title: String, memberCount: Int)
     }
 
@@ -103,6 +105,8 @@ public extension TelegramEngine.Messages {
                 switch peer.kind {
                 case let .user(firstName, lastName, _):
                     peers.append(TelegramUser(id: peer.id, accessHash: nil, firstName: firstName, lastName: lastName, username: nil, phone: nil, photo: [], botInfo: nil, restrictionInfo: nil, flags: [], emojiStatus: nil, usernames: [], storiesHidden: nil, nameColor: nil, backgroundEmojiId: nil, profileColor: nil, profileBackgroundEmojiId: nil, subscriberCount: nil, verificationIconFileId: nil))
+                case let .bot(name):
+                    peers.append(TelegramUser(id: peer.id, accessHash: nil, firstName: name, lastName: nil, username: nil, phone: nil, photo: [], botInfo: BotUserInfo(flags: [], inlinePlaceholder: nil), restrictionInfo: nil, flags: [], emojiStatus: nil, usernames: [], storiesHidden: nil, nameColor: nil, backgroundEmojiId: nil, profileColor: nil, profileBackgroundEmojiId: nil, subscriberCount: nil, verificationIconFileId: nil))
                 case let .group(title, memberCount):
                     peers.append(TelegramGroup(id: peer.id, title: title, photo: [], participantCount: memberCount, role: .member, membership: .Member, flags: [], defaultBannedRights: nil, migrationReference: nil, creationDate: 0, version: 0))
                 }
@@ -158,7 +162,7 @@ public extension TelegramEngine.Messages {
                 switch peer.kind {
                 case let .user(_, _, isInChatList):
                     transaction.updatePeerChatListInclusion(peer.id, inclusion: isInChatList ? .ifHasMessagesOrOneOf(groupId: .root, pinningIndex: nil, minTimestamp: nil) : .notIncluded)
-                case .group:
+                case .bot, .group:
                     transaction.updatePeerChatListInclusion(peer.id, inclusion: .ifHasMessagesOrOneOf(groupId: .root, pinningIndex: nil, minTimestamp: nil))
                 }
             }

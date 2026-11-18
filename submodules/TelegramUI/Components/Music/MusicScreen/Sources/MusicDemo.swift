@@ -86,6 +86,10 @@ enum MusicDemo {
     private static let indieFinds = musicDemoPeerId(index: 1, isGroup: true)
     private static let designTeam = musicDemoPeerId(index: 2, isGroup: true)
     private static let runningClub = musicDemoPeerId(index: 3, isGroup: true)
+    /// Two music bots: their tracks are also in other chats (older here, so the library keeps the same rows), so
+    /// choosing only them as sources leaves exactly their tracks.
+    private static let lofiBot = musicDemoPeerId(index: 6, isGroup: false)
+    private static let indieBot = musicDemoPeerId(index: 7, isGroup: false)
 
     /// Anna's playlist in her chat: hers, so it is not among the account's playlists.
     static let foreignPlaylistId = 900
@@ -189,6 +193,25 @@ enum MusicDemo {
             (theo, "Great, see you all!", nil)
         ])
 
+        chat(lofiBot, endsAgo: 4 * 24 * 60 * 60, [
+            (nil, "/start", nil),
+            (lofiBot, "Hi! I send a calm mix every morning ☕️", nil),
+            (lofiBot, "", 8),
+            (lofiBot, "", 9),
+            (lofiBot, "", 23),
+            (lofiBot, "", 18),
+            (lofiBot, "Have a slow morning!", nil)
+        ])
+        chat(indieBot, endsAgo: 5 * 24 * 60 * 60, [
+            (nil, "/start", nil),
+            (indieBot, "Fresh indie picks, every Friday 🎸", nil),
+            (indieBot, "", 10),
+            (indieBot, "", 11),
+            (indieBot, "", 1),
+            (indieBot, "", 12),
+            (indieBot, "See you next Friday!", nil)
+        ])
+
         let peers: [MusicDemoSeed.Peer] = [
             MusicDemoSeed.Peer(id: anna, kind: .user(firstName: "Anna", lastName: "Kovacs", isInChatList: true), unreadCount: 2),
             MusicDemoSeed.Peer(id: leo, kind: .user(firstName: "Leo", lastName: "Martin", isInChatList: true)),
@@ -199,7 +222,9 @@ enum MusicDemo {
             MusicDemoSeed.Peer(id: weekendTrip, kind: .group(title: "Weekend Trip", memberCount: 4), unreadCount: 3),
             MusicDemoSeed.Peer(id: indieFinds, kind: .group(title: "Indie Finds", memberCount: 248), unreadCount: 4),
             MusicDemoSeed.Peer(id: designTeam, kind: .group(title: "Design Team", memberCount: 6)),
-            MusicDemoSeed.Peer(id: runningClub, kind: .group(title: "Running Club", memberCount: 12))
+            MusicDemoSeed.Peer(id: runningClub, kind: .group(title: "Running Club", memberCount: 12)),
+            MusicDemoSeed.Peer(id: lofiBot, kind: .bot(name: "Lo-Fi Music Bot")),
+            MusicDemoSeed.Peer(id: indieBot, kind: .bot(name: "Indie Music Bot"))
         ]
         return MusicDemoSeed(peers: peers, messages: messages, savedMusic: [anna: annaProfileTracks.map { MusicDemo.file($0) }], accountSavedMusic: [])
     }
