@@ -7,6 +7,7 @@ import SwiftSignalKit
 import TelegramPresentationData
 import ItemListUI
 import ManagedAnimationNode
+import GradientBackground
 import GlassBackgroundComponent
 import ButtonComponent
 import BundleIconComponent
@@ -59,28 +60,25 @@ private struct MusicHubTilePalette {
     }
 }
 
-/// The tile's four colours drifting along the eight points of the client's wallpaper gradient (`GradientBackgroundNode`),
-/// as radial layers moved by Core Animation: the render server draws and animates them, so nothing runs on the main
-/// thread while the colours flow (the wallpaper node computed every frame of every step on it).
+/// The tile's colours flowing as the client's wallpaper gradient (`GradientBackgroundNode`) does, step after step
+/// through its eight phases. The loop always repeats the same eight steps, so it is rendered once off the main thread
+/// (`generateFlowFrame`, the node's own drawing) and played by Core Animation, which blends neighbouring frames: the
+/// node itself drew every frame of every step on the main thread while it ran, which stalled the hub during playback.
 private final class MusicHubTileFlowView: UIView {
-    /// `GradientBackgroundNode.basePositions`: colour `i` walks them starting at point `2 * i`.
-    private static let basePositions: [CGPoint] = [
-        CGPoint(x: 0.80, y: 0.10),
-        CGPoint(x: 0.60, y: 0.20),
-        CGPoint(x: 0.35, y: 0.25),
-        CGPoint(x: 0.25, y: 0.60),
-        CGPoint(x: 0.20, y: 0.90),
-        CGPoint(x: 0.40, y: 0.80),
-        CGPoint(x: 0.65, y: 0.75),
-        CGPoint(x: 0.75, y: 0.40)
-    ]
     private static let animationKey = "flow"
+    /// Frames drawn per step; Core Animation crossfades between them.
+    private static let framesPerStep = 8
+    private static let phaseCount = 8
+    /// Loops already rendered, by colours and size: the hub's tiles come back with the same ones.
+    private static var cachedFrames: [String: [CGImage]] = [:]
 
-    private var blobLayers: [CAGradientLayer] = []
+    private let contentLayer = CALayer()
     private var colors: [UIColor] = []
     private var stepDuration: Double = 3.0
     private var phase: Double = 0.0
-    private var animatedSize: CGSize?
+    private var frameKey: String?
+    private var frames: [CGImage]?
+    private var renderGeneration = 0
 
     private var isScrollPaused = false
     private var isPaused = false
@@ -89,6 +87,8 @@ private final class MusicHubTileFlowView: UIView {
         super.init(frame: frame)
         self.isUserInteractionEnabled = false
         self.clipsToBounds = true
+        self.contentLayer.contentsGravity = .resize
+        self.layer.addSublayer(self.contentLayer)
 
         NotificationCenter.default.addObserver(self, selector: #selector(self.systemStateChanged), name: .NSProcessInfoPowerStateDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(self.systemStateChanged), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
@@ -106,33 +106,72 @@ private final class MusicHubTileFlowView: UIView {
 
     /// Colours, the length of one of the eight steps and how far into the loop the tile starts.
     func update(colors: [UIColor], stepDuration: Double, phase: Double, size: CGSize) {
-        let colorsChanged = self.colors != colors
         self.colors = colors
         self.stepDuration = stepDuration
         self.phase = phase
 
-        if colorsChanged {
-            self.backgroundColor = MusicHubTileFlowView.averageColor(colors)
-            while self.blobLayers.count < colors.count {
-                let blob = CAGradientLayer()
-                blob.type = .radial
-                blob.startPoint = CGPoint(x: 0.5, y: 0.5)
-                blob.endPoint = CGPoint(x: 1.0, y: 1.0)
-                self.layer.addSublayer(blob)
-                self.blobLayers.append(blob)
-            }
-            while self.blobLayers.count > colors.count {
-                self.blobLayers.removeLast().removeFromSuperlayer()
-            }
-            for (blob, color) in zip(self.blobLayers, colors) {
-                blob.colors = [color.cgColor, color.withAlphaComponent(0.0).cgColor]
-            }
-        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.contentLayer.frame = CGRect(origin: CGPoint(), size: size)
+        CATransaction.commit()
 
-        if self.animatedSize != size || colorsChanged {
-            self.animatedSize = size
-            self.addAnimations(size: size)
+        // The node's own resolution: the gradient is drawn at most 80 pt across and stretched.
+        let imageSize = size.fitted(CGSize(width: 80.0, height: 80.0)).integralFloor
+        guard imageSize.width >= 1.0, imageSize.height >= 1.0 else {
+            return
         }
+        let key = colors.map { String($0.argb, radix: 16) }.joined(separator: ",") + " \(Int(imageSize.width))x\(Int(imageSize.height))"
+        if key == self.frameKey {
+            return
+        }
+        self.frameKey = key
+        self.frames = nil
+        self.renderGeneration += 1
+        let generation = self.renderGeneration
+
+        if let frames = MusicHubTileFlowView.cachedFrames[key] {
+            self.apply(frames: frames)
+            return
+        }
+        // Until the loop is ready the tile shows its first frame, which is one small image.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.contentLayer.removeAnimation(forKey: MusicHubTileFlowView.animationKey)
+        self.contentLayer.contents = GradientBackgroundNode.generateFlowFrame(size: imageSize, colors: colors, phase: 0, fraction: 0.0).cgImage
+        CATransaction.commit()
+
+        Queue.concurrentDefaultQueue().async { [weak self] in
+            let frames = MusicHubTileFlowView.renderLoop(size: imageSize, colors: colors)
+            Queue.mainQueue().async { [weak self] in
+                MusicHubTileFlowView.cachedFrames[key] = frames
+                guard let self, generation == self.renderGeneration else {
+                    return
+                }
+                self.apply(frames: frames)
+            }
+        }
+    }
+
+    /// Forward steps from phase 0, as the node takes them (0, 7, 6, …, 1), closed by the first frame again.
+    private static func renderLoop(size: CGSize, colors: [UIColor]) -> [CGImage] {
+        var frames: [CGImage] = []
+        for step in 0 ..< phaseCount {
+            let phase = (phaseCount - step) % phaseCount
+            for index in 0 ..< framesPerStep {
+                if let image = GradientBackgroundNode.generateFlowFrame(size: size, colors: colors, phase: phase, fraction: CGFloat(index) / CGFloat(framesPerStep)).cgImage {
+                    frames.append(image)
+                }
+            }
+        }
+        if let first = frames.first {
+            frames.append(first)
+        }
+        return frames
+    }
+
+    private func apply(frames: [CGImage]) {
+        self.frames = frames
+        self.addAnimation()
         self.updatePaused()
     }
 
@@ -144,37 +183,29 @@ private final class MusicHubTileFlowView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         // Animations can be dropped while the layer is out of a window (the app in background); put them back.
-        if self.window != nil, let size = self.animatedSize, let blob = self.blobLayers.first, blob.animation(forKey: MusicHubTileFlowView.animationKey) == nil {
-            self.addAnimations(size: size)
+        if self.window != nil, self.frames != nil, self.contentLayer.animation(forKey: MusicHubTileFlowView.animationKey) == nil {
+            self.addAnimation()
         }
         self.updatePaused()
     }
 
-    private func addAnimations(size: CGSize) {
-        // Each colour covers about the tile's width around its point, as the wallpaper's colour field does.
-        let diameter = max(size.width, size.height) * 1.3
-        let points = MusicHubTileFlowView.basePositions
+    private func addAnimation() {
+        guard let frames = self.frames, let first = frames.first else {
+            return
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for (index, blob) in self.blobLayers.enumerated() {
-            blob.removeAnimation(forKey: MusicHubTileFlowView.animationKey)
-            blob.bounds = CGRect(origin: CGPoint(), size: CGSize(width: diameter, height: diameter))
-            let start = (index * 2) % points.count
-            let values = (0 ... points.count).map { step -> NSValue in
-                let point = points[(start + step) % points.count]
-                return NSValue(cgPoint: CGPoint(x: point.x * size.width, y: point.y * size.height))
-            }
-            blob.position = values[0].cgPointValue
+        self.contentLayer.removeAnimation(forKey: MusicHubTileFlowView.animationKey)
+        self.contentLayer.contents = first
 
-            let animation = CAKeyframeAnimation(keyPath: "position")
-            animation.values = values
-            animation.calculationMode = .cubic
-            animation.duration = self.stepDuration * Double(points.count)
-            animation.repeatCount = .infinity
-            animation.isRemovedOnCompletion = false
-            animation.timeOffset = self.phase
-            blob.add(animation, forKey: MusicHubTileFlowView.animationKey)
-        }
+        let animation = CAKeyframeAnimation(keyPath: "contents")
+        animation.values = frames
+        animation.calculationMode = .linear
+        animation.duration = self.stepDuration * Double(MusicHubTileFlowView.phaseCount)
+        animation.repeatCount = .infinity
+        animation.isRemovedOnCompletion = false
+        animation.timeOffset = self.phase
+        self.contentLayer.add(animation, forKey: MusicHubTileFlowView.animationKey)
         CATransaction.commit()
     }
 
@@ -197,22 +228,6 @@ private final class MusicHubTileFlowView: UIView {
             layer.beginTime = 0.0
             layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
         }
-    }
-
-    private static func averageColor(_ colors: [UIColor]) -> UIColor {
-        guard !colors.isEmpty else {
-            return .clear
-        }
-        var sum: (r: CGFloat, g: CGFloat, b: CGFloat) = (0.0, 0.0, 0.0)
-        for color in colors {
-            var r: CGFloat = 0.0
-            var g: CGFloat = 0.0
-            var b: CGFloat = 0.0
-            color.getRed(&r, green: &g, blue: &b, alpha: nil)
-            sum = (sum.r + r, sum.g + g, sum.b + b)
-        }
-        let count = CGFloat(colors.count)
-        return UIColor(red: sum.r / count, green: sum.g / count, blue: sum.b / count, alpha: 1.0)
     }
 }
 

@@ -398,6 +398,17 @@ public final class GradientBackgroundNode: ASDisplayNode {
         return generateGradient(size: size, colors: colors, positions: positions).0
     }
 
+    /// One frame of the step a forward `animateEvent` with a linear transition takes from `phase` (to `phase - 1`),
+    /// `fraction` of the way through it: the same picture the node draws, for callers that play a whole loop of
+    /// steps from frames rendered once. Safe off the main thread.
+    public static func generateFlowFrame(size: CGSize, colors: [UIColor], phase: Int, fraction: CGFloat) -> UIImage {
+        let phase = ((phase % 8) + 8) % 8
+        let from = gatherPositions(shiftArray(array: GradientBackgroundNode.basePositions, offset: phase))
+        let to = gatherPositions(shiftArray(array: GradientBackgroundNode.basePositions, offset: (phase + 7) % 8))
+        let positions = zip(from, to).map { interpolatePoints($0, $1, at: fraction) }
+        return generateGradient(size: size, colors: colors, positions: positions).0
+    }
+
     private var colors: [UIColor]
     private var phase: Int = 0
     
