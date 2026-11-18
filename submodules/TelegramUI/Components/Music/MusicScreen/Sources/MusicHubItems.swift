@@ -7,7 +7,6 @@ import SwiftSignalKit
 import TelegramPresentationData
 import ItemListUI
 import ManagedAnimationNode
-import GradientBackground
 import GlassBackgroundComponent
 import ButtonComponent
 import BundleIconComponent
@@ -60,29 +59,211 @@ private struct MusicHubTilePalette {
     }
 }
 
+/// The tile's four colours drifting along the eight points of the client's wallpaper gradient (`GradientBackgroundNode`),
+/// as radial layers moved by Core Animation: the render server draws and animates them, so nothing runs on the main
+/// thread while the colours flow (the wallpaper node computed every frame of every step on it).
+private final class MusicHubTileFlowView: UIView {
+    /// `GradientBackgroundNode.basePositions`: colour `i` walks them starting at point `2 * i`.
+    private static let basePositions: [CGPoint] = [
+        CGPoint(x: 0.80, y: 0.10),
+        CGPoint(x: 0.60, y: 0.20),
+        CGPoint(x: 0.35, y: 0.25),
+        CGPoint(x: 0.25, y: 0.60),
+        CGPoint(x: 0.20, y: 0.90),
+        CGPoint(x: 0.40, y: 0.80),
+        CGPoint(x: 0.65, y: 0.75),
+        CGPoint(x: 0.75, y: 0.40)
+    ]
+    private static let animationKey = "flow"
+
+    private var blobLayers: [CAGradientLayer] = []
+    private var colors: [UIColor] = []
+    private var stepDuration: Double = 3.0
+    private var phase: Double = 0.0
+    private var animatedSize: CGSize?
+
+    private var isScrollPaused = false
+    private var isPaused = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        self.isUserInteractionEnabled = false
+        self.clipsToBounds = true
+
+        NotificationCenter.default.addObserver(self, selector: #selector(self.systemStateChanged), name: .NSProcessInfoPowerStateDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(self.systemStateChanged), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func systemStateChanged() {
+        DispatchQueue.main.async { [weak self] in
+            self?.updatePaused()
+        }
+    }
+
+    /// Colours, the length of one of the eight steps and how far into the loop the tile starts.
+    func update(colors: [UIColor], stepDuration: Double, phase: Double, size: CGSize) {
+        let colorsChanged = self.colors != colors
+        self.colors = colors
+        self.stepDuration = stepDuration
+        self.phase = phase
+
+        if colorsChanged {
+            self.backgroundColor = MusicHubTileFlowView.averageColor(colors)
+            while self.blobLayers.count < colors.count {
+                let blob = CAGradientLayer()
+                blob.type = .radial
+                blob.startPoint = CGPoint(x: 0.5, y: 0.5)
+                blob.endPoint = CGPoint(x: 1.0, y: 1.0)
+                self.layer.addSublayer(blob)
+                self.blobLayers.append(blob)
+            }
+            while self.blobLayers.count > colors.count {
+                self.blobLayers.removeLast().removeFromSuperlayer()
+            }
+            for (blob, color) in zip(self.blobLayers, colors) {
+                blob.colors = [color.cgColor, color.withAlphaComponent(0.0).cgColor]
+            }
+        }
+
+        if self.animatedSize != size || colorsChanged {
+            self.animatedSize = size
+            self.addAnimations(size: size)
+        }
+        self.updatePaused()
+    }
+
+    func setScrollPaused(_ paused: Bool) {
+        self.isScrollPaused = paused
+        self.updatePaused()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        // Animations can be dropped while the layer is out of a window (the app in background); put them back.
+        if self.window != nil, let size = self.animatedSize, let blob = self.blobLayers.first, blob.animation(forKey: MusicHubTileFlowView.animationKey) == nil {
+            self.addAnimations(size: size)
+        }
+        self.updatePaused()
+    }
+
+    private func addAnimations(size: CGSize) {
+        // Each colour covers about the tile's width around its point, as the wallpaper's colour field does.
+        let diameter = max(size.width, size.height) * 1.3
+        let points = MusicHubTileFlowView.basePositions
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, blob) in self.blobLayers.enumerated() {
+            blob.removeAnimation(forKey: MusicHubTileFlowView.animationKey)
+            blob.bounds = CGRect(origin: CGPoint(), size: CGSize(width: diameter, height: diameter))
+            let start = (index * 2) % points.count
+            let values = (0 ... points.count).map { step -> NSValue in
+                let point = points[(start + step) % points.count]
+                return NSValue(cgPoint: CGPoint(x: point.x * size.width, y: point.y * size.height))
+            }
+            blob.position = values[0].cgPointValue
+
+            let animation = CAKeyframeAnimation(keyPath: "position")
+            animation.values = values
+            animation.calculationMode = .cubic
+            animation.duration = self.stepDuration * Double(points.count)
+            animation.repeatCount = .infinity
+            animation.isRemovedOnCompletion = false
+            animation.timeOffset = self.phase
+            blob.add(animation, forKey: MusicHubTileFlowView.animationKey)
+        }
+        CATransaction.commit()
+    }
+
+    /// Freezes the colours where they are while the list scrolls, in Low Power Mode and with Reduce Motion.
+    private func updatePaused() {
+        let paused = self.isScrollPaused || ProcessInfo.processInfo.isLowPowerModeEnabled || UIAccessibility.isReduceMotionEnabled
+        guard paused != self.isPaused else {
+            return
+        }
+        self.isPaused = paused
+        let layer = self.layer
+        if paused {
+            let pausedTime = layer.convertTime(CACurrentMediaTime(), from: nil)
+            layer.speed = 0.0
+            layer.timeOffset = pausedTime
+        } else {
+            let pausedTime = layer.timeOffset
+            layer.speed = 1.0
+            layer.timeOffset = 0.0
+            layer.beginTime = 0.0
+            layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
+        }
+    }
+
+    private static func averageColor(_ colors: [UIColor]) -> UIColor {
+        guard !colors.isEmpty else {
+            return .clear
+        }
+        var sum: (r: CGFloat, g: CGFloat, b: CGFloat) = (0.0, 0.0, 0.0)
+        for color in colors {
+            var r: CGFloat = 0.0
+            var g: CGFloat = 0.0
+            var b: CGFloat = 0.0
+            color.getRed(&r, green: &g, blue: &b, alpha: nil)
+            sum = (sum.r + r, sum.g + g, sum.b + b)
+        }
+        let count = CGFloat(colors.count)
+        return UIColor(red: sum.r / count, green: sum.g / count, blue: sum.b / count, alpha: 1.0)
+    }
+}
+
 private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
     static let cornerRadius: CGFloat = 26.0
+    static let rimWidth: CGFloat = 0.8
+
+    /// The rim of the client's legacy glass for this fill (`generateLegacyGlassImage`): white, stronger in light mode,
+    /// laid in overlay over saturated fills.
+    static func rimStyle(fillColor: UIColor, isDark: Bool) -> (color: UIColor, isOverlay: Bool) {
+        var alpha: CGFloat = 0.0
+        var brightness: CGFloat = 0.0
+        var saturation: CGFloat = 0.0
+        fillColor.getHue(nil, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        let baseAlpha: CGFloat = isDark ? 0.3 : 0.6
+        if saturation == 0.0 && abs(alpha - 0.7) < 0.1 && !isDark {
+            return (UIColor(white: 1.0, alpha: baseAlpha), false)
+        } else if saturation <= 0.3 && !isDark {
+            return (UIColor(white: 1.0, alpha: 0.7 * baseAlpha), false)
+        } else if brightness >= 0.2 {
+            let maxAlpha: CGFloat = isDark ? 0.7 : 0.8
+            return (UIColor(white: 1.0, alpha: max(0.5, min(1.0, maxAlpha * saturation)) * baseAlpha), true)
+        } else {
+            return (UIColor(white: 1.0, alpha: 0.5 * baseAlpha), false)
+        }
+    }
 
     /// Everything the press tilts; the tile itself keeps the frame its parent gives it.
     private let pressView = UIView()
-    private let gradientNode = GradientBackgroundNode(adjustSaturation: false)
+    private let flowView = MusicHubTileFlowView()
     /// Light on the rim: a radial gradient seen only through a stroke of the outline.
     private let edgeLightLayer = CAGradientLayer()
     private let edgeLightMask = CAShapeLayer()
     private var isPressed = false
     private var isIconPlaying = false
-    private var isFlowing = false
-    /// Bumped whenever flowing stops, so a step scheduled before cannot start a second chain.
-    private var flowGeneration = 0
-    private let glassView = GlassBackgroundView()
+    /// How long the finger stays on the tile before the press counts as a hold; a quick tap ends sooner.
+    private static let holdDelay: Double = 0.3
+    /// Bumped on every press and release, so a hold check scheduled for an earlier press cannot play the icon.
+    private var holdGeneration = 0
+    /// The glass of the tile, without a live blur: the client's legacy glass (`GlassBackgroundView.generateLegacyGlassImage`),
+    /// its tint over the colours plus a thin light rim. Blurring a soft gradient changed almost nothing on screen, while
+    /// re-blurring it on every frame of the flow kept the GPU busy.
+    private let tintLayer = CALayer()
+    private let rimLayer = CAShapeLayer()
     private let titleNode = ImmediateTextNode()
     private var animationNode: SimpleAnimationNode?
 
     private var tile: MusicHubTile?
     private var isDark: Bool?
-    private var phase: Double = 0.0
-    /// Index of the tile in the grid: picks its own step length and the corner each colour starts in.
-    private var flowIndex: Int = 0
+    /// What the last `update` laid out: the same values again change nothing, so they are skipped.
+    private var appliedParams: (tile: MusicHubTile, index: Int, phase: Double, isDark: Bool, size: CGSize)?
     var action: (() -> Void)?
 
     override init(frame: CGRect) {
@@ -94,11 +275,13 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
         self.pressView.layer.cornerCurve = .continuous
         self.addSubview(self.pressView)
 
-        self.gradientNode.isUserInteractionEnabled = false
-        self.pressView.addSubview(self.gradientNode.view)
+        self.pressView.addSubview(self.flowView)
 
-        self.pressView.addSubview(self.glassView)
-        self.glassView.contentView.addSubview(self.titleNode.view)
+        self.pressView.layer.addSublayer(self.tintLayer)
+        self.rimLayer.fillColor = nil
+        self.rimLayer.lineWidth = MusicHubTileView.rimWidth
+        self.pressView.layer.addSublayer(self.rimLayer)
+        self.pressView.addSubview(self.titleNode.view)
         self.titleNode.isUserInteractionEnabled = false
 
         self.edgeLightLayer.type = .radial
@@ -181,8 +364,17 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
         transition.updateAlpha(layer: self.edgeLightLayer, alpha: CGFloat(lightOpacity))
         if pressed && !wasPressed {
             HapticFeedback().impact(.light)
-            // Played on touch down: the section opens on release and pushes the hub away before a later start could be seen.
-            self.playIcon()
+            // Only a hold plays the icon: a plain tap opens the section without it.
+            self.holdGeneration += 1
+            let generation = self.holdGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + MusicHubTileView.holdDelay) { [weak self] in
+                guard let self, self.isPressed, generation == self.holdGeneration else {
+                    return
+                }
+                self.playIcon()
+            }
+        } else if !pressed {
+            self.holdGeneration += 1
         }
     }
 
@@ -190,14 +382,8 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        if self.window != nil {
-            self.startFlowing()
-        } else {
-            self.isFlowing = false
-            self.flowGeneration += 1
-        }
+    func setFlowPaused(_ paused: Bool) {
+        self.flowView.setScrollPaused(paused)
     }
 
     private func playIcon() {
@@ -219,21 +405,25 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
 
     func update(tile: MusicHubTile, index: Int, phase: Double, theme: PresentationTheme, size: CGSize) {
         let isDark = theme.overallDarkAppearance
+        // Playback and library updates rebuild the hub items with the same tiles: nothing to redo then.
+        if let applied = self.appliedParams, applied.tile == tile, applied.index == index, applied.phase == phase, applied.isDark == isDark, applied.size == size {
+            return
+        }
+        self.appliedParams = (tile, index, phase, isDark, size)
         let palette = MusicHubTilePalette.palette(kind: tile.kind, isDark: isDark)
         let previousTile = self.tile
         let previousIsDark = self.isDark
         self.tile = tile
-        self.phase = phase
-        self.flowIndex = index
+        self.isDark = isDark
 
-        if previousTile?.kind != tile.kind || self.isDark != isDark {
-            self.isDark = isDark
-            // Four points of the client's wallpaper gradient, from the tile's palette.
-            // Rotated per tile, so no two tiles show the same picture at the same phase.
-            let colors = [palette.start, palette.glow, palette.end, palette.start.mixedWith(palette.glow, alpha: 0.5)]
-            let shift = index % colors.count
-            self.gradientNode.updateColors(colors: Array(colors[shift...] + colors[..<shift]))
-        }
+        // Four points of the client's wallpaper gradient, from the tile's palette.
+        // Rotated per tile, so no two tiles show the same picture at the same phase.
+        let colors = [palette.start, palette.glow, palette.end, palette.start.mixedWith(palette.glow, alpha: 0.5)]
+        let shift = index % colors.count
+        // Steps of different length per tile keep the tiles drifting apart instead of moving in step.
+        let stepDurations: [Double] = [3.0, 3.7, 2.6, 4.3]
+        self.flowView.frame = CGRect(origin: CGPoint(), size: size)
+        self.flowView.update(colors: Array(colors[shift...] + colors[..<shift]), stepDuration: stepDurations[index % stepDurations.count], phase: phase, size: size)
 
         self.pressView.bounds = CGRect(origin: CGPoint(), size: size)
         self.pressView.center = CGPoint(x: size.width / 2.0, y: size.height / 2.0)
@@ -241,13 +431,18 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
         self.edgeLightMask.frame = CGRect(origin: CGPoint(), size: size)
         self.edgeLightMask.path = UIBezierPath(roundedRect: CGRect(origin: CGPoint(), size: size).insetBy(dx: 0.75, dy: 0.75), cornerRadius: MusicHubTileView.cornerRadius - 0.75).cgPath
 
-        if self.gradientNode.frame.size != size {
-            self.gradientNode.frame = CGRect(origin: CGPoint(), size: size)
-            self.gradientNode.updateLayout(size: size, transition: .immediate, extendAnimation: false, backwards: false, completion: {})
-        }
-
-        self.glassView.frame = CGRect(origin: CGPoint(), size: size)
-        self.glassView.update(size: size, cornerRadius: MusicHubTileView.cornerRadius, isDark: isDark, tintColor: GlassBackgroundView.TintColor(kind: .custom(style: .clear, color: palette.start.withAlphaComponent(isDark ? 0.25 : 0.35))), isInteractive: true, transition: .immediate)
+        let tintColor = palette.start.withAlphaComponent(isDark ? 0.25 : 0.35)
+        let rim = MusicHubTileView.rimStyle(fillColor: tintColor, isDark: isDark)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.tintLayer.frame = CGRect(origin: CGPoint(), size: size)
+        self.tintLayer.backgroundColor = tintColor.cgColor
+        self.rimLayer.frame = CGRect(origin: CGPoint(), size: size)
+        let rimInset = MusicHubTileView.rimWidth * 0.5
+        self.rimLayer.path = UIBezierPath(roundedRect: CGRect(origin: CGPoint(), size: size).insetBy(dx: rimInset, dy: rimInset), cornerRadius: MusicHubTileView.cornerRadius - rimInset).cgPath
+        self.rimLayer.strokeColor = rim.color.cgColor
+        self.rimLayer.compositingFilter = rim.isOverlay ? "overlayBlendMode" : nil
+        CATransaction.commit()
 
         self.titleNode.attributedText = NSAttributedString(string: tile.title, font: Font.semibold(17.0), textColor: palette.foreground)
         let titleSize = self.titleNode.updateLayout(CGSize(width: size.width - 32.0, height: 40.0))
@@ -268,38 +463,9 @@ private final class MusicHubTileView: UIView, UIGestureRecognizerDelegate {
             animationNode.isUserInteractionEnabled = false
             animationNode.seekToEnd(immediately: true)
             self.animationNode = animationNode
-            self.glassView.contentView.addSubview(animationNode.view)
+            self.pressView.insertSubview(animationNode.view, aboveSubview: self.titleNode.view)
         }
         animationNode.frame = CGRect(origin: CGPoint(x: 12.0, y: 12.0), size: animationSize)
-
-        self.startFlowing()
-    }
-
-    /// The wallpaper gradient steps through its eight phases one after another, so the colours flow under the glass without a pause. Each tile starts after its own delay.
-    private func startFlowing() {
-        guard !self.isFlowing, self.window != nil, self.bounds.width > 0.0 else {
-            return
-        }
-        self.isFlowing = true
-        self.flowGeneration += 1
-        let generation = self.flowGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + self.phase.truncatingRemainder(dividingBy: 3.0)) { [weak self] in
-            self?.flowStep(generation: generation)
-        }
-    }
-
-    /// One phase every 3 s on a fixed clock, not on the animation's completion, which can fire at once and spin the gradient.
-    private func flowStep(generation: Int) {
-        guard self.isFlowing, generation == self.flowGeneration, self.window != nil else {
-            return
-        }
-        // Steps of different length per tile keep the tiles drifting apart instead of moving in step.
-        let stepDurations: [Double] = [3.0, 3.7, 2.6, 4.3]
-        let stepDuration = stepDurations[self.flowIndex % stepDurations.count]
-        self.gradientNode.animateEvent(transition: .animated(duration: stepDuration, curve: .linear), extendAnimation: false, backwards: false, completion: {})
-        DispatchQueue.main.asyncAfter(deadline: .now() + stepDuration) { [weak self] in
-            self?.flowStep(generation: generation)
-        }
     }
 }
 
@@ -360,9 +526,18 @@ final class MusicHubTilesItem: ListViewItem, ItemListItem {
 final class MusicHubTilesItemNode: ListViewItemNode {
     private var tileViews: [MusicHubTile.Kind: MusicHubTileView] = [:]
     private var item: MusicHubTilesItem?
+    private var isFlowPaused = false
 
     init() {
         super.init(layerBacked: false, rotated: false, seeThrough: false)
+    }
+
+    /// Holds the tiles' colours still while the list scrolls.
+    func setFlowPaused(_ paused: Bool) {
+        self.isFlowPaused = paused
+        for view in self.tileViews.values {
+            view.setFlowPaused(paused)
+        }
     }
 
     func asyncLayout() -> (_ item: MusicHubTilesItem, _ params: ListViewItemLayoutParams) -> (ListViewItemNodeLayout, () -> Void) {
@@ -388,6 +563,7 @@ final class MusicHubTilesItemNode: ListViewItemNode {
                         tileView = current
                     } else {
                         tileView = MusicHubTileView()
+                        tileView.setFlowPaused(strongSelf.isFlowPaused)
                         strongSelf.tileViews[tile.kind] = tileView
                         strongSelf.view.addSubview(tileView)
                     }

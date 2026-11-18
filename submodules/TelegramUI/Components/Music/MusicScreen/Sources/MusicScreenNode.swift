@@ -362,7 +362,11 @@ final class MusicScreenNode: ASDisplayNode {
         self.listNode.visibleContentOffsetChanged = { [weak self] _, _ in
             self?.applyNavigationScroll(transition: .immediate)
         }
+        self.listNode.beganInteractiveDragging = { [weak self] _ in
+            self?.setHubTilesFlowPaused(true)
+        }
         self.listNode.didEndScrolling = { [weak self] _ in
+            self?.setHubTilesFlowPaused(false)
             self?.snapNavigationScroll()
         }
         if self.isPlaylistScreen {
@@ -2987,6 +2991,13 @@ final class MusicScreenNode: ASDisplayNode {
             self.navigationScrollOffset = max(0.0, min(value, ChatListNavigationBar.searchScrollHeight))
         }
         navigationBarComponentView.applyScroll(offset: self.navigationScrollOffset, allowAvatarsExpansion: false, forceUpdate: true, transition: transition)
+    }
+
+    /// The hub tiles' colours stand still while the list moves, so they add no work to the frames of a scroll.
+    private func setHubTilesFlowPaused(_ paused: Bool) {
+        self.listNode.forEachItemNode { itemNode in
+            (itemNode as? MusicHubTilesItemNode)?.setFlowPaused(paused)
+        }
     }
 
     private func snapNavigationScroll() {
