@@ -260,7 +260,6 @@ public final class MusicScreen: ViewController {
     }
 
     func open(section: MusicSection, library: MusicLibrary) {
-        self.isReturningFromSection = true
         let controller = MusicScreen(context: self.context, mode: .navigation, section: section, library: library, picker: self.picker)
         controller.attachmentSelection = self.attachmentSelection
         (self.navigationController as? NavigationController)?.pushViewController(controller)
@@ -799,14 +798,24 @@ public final class MusicScreen: ViewController {
         self.musicNode.refresh()
     }
 
-    /// Set while a pushed section is on top, so coming back from it does not replay the hub icons.
-    private var isReturningFromSection = false
+    /// The hub icons replay only when the screen first shows and when its tab is selected in the tab bar.
+    /// Coming back from anything opened inside Music (a pushed section, the track editor, sheets, menus) leaves them still.
+    private var didPlayHubIcons = false
+
+    override public func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        // The tab bar adds the selected tab's view (and UIKit sends viewDidAppear) before this call, so the tab
+        // selection plays the icons here rather than marking the next appearance.
+        if parent is TabBarController, self.isNodeLoaded {
+            self.didPlayHubIcons = true
+            self.musicNode.playHubIcons()
+        }
+    }
 
     override public func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if self.isReturningFromSection {
-            self.isReturningFromSection = false
-        } else {
+        if !self.didPlayHubIcons {
+            self.didPlayHubIcons = true
             self.musicNode.playHubIcons()
         }
     }
