@@ -786,7 +786,7 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 // As the player's Favorites toggle: a favorite playlist shows the crossed star (the tap removes it) in the
                 // accent colour on accent-tinted glass.
                 let accentGlass = theme.list.itemAccentColor.withMultipliedAlpha(0.1)
-                let favoriteBackground = item.isFavorite ? ButtonComponent.Background(style: .actualGlass, color: accentGlass, foreground: theme.list.itemAccentColor, pressedColor: accentGlass, cornerRadius: height * 0.5) : glassBackground
+                let favoriteBackground = item.isFavorite ? ButtonComponent.Background(style: .actualGlass, color: accentGlass, foreground: theme.list.itemAccentColor, pressedColor: accentGlass, cornerRadius: height * 0.5, isDarkGlass: theme.overallDarkAppearance) : glassBackground
                 let favoriteContent = iconContent(item.isFavorite ? "Music/StarSlash" : "Music/Star", 24.0, item.isFavorite ? theme.list.itemAccentColor : foreground)
                 let favoriteChanged = self.favoriteContentId != nil && self.favoriteContentId != favoriteContent.id
                 self.favoriteContentId = favoriteContent.id

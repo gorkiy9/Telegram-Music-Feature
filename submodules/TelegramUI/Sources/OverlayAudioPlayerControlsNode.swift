@@ -1314,7 +1314,7 @@ final class OverlayAudioPlayerControlsNode: ASDisplayNode {
             let _ = self.panelButtons[index].update(
                 transition: .immediate,
                 component: AnyComponent(ButtonComponent(
-                    background: ButtonComponent.Background(style: .actualGlass, color: glass, foreground: color, pressedColor: glass, cornerRadius: panelHeight * 0.5),
+                    background: ButtonComponent.Background(style: .actualGlass, color: glass, foreground: color, pressedColor: glass, cornerRadius: panelHeight * 0.5, isDarkGlass: theme.overallDarkAppearance),
                     content: AnyComponentWithIdentity(id: contentId, component: AnyComponent(BundleIconComponent(name: item.icon, tintColor: color))),
                     isEnabled: item.isEnabled,
                     action: { [weak self] in

@@ -373,6 +373,9 @@ public final class ButtonComponent: Component {
         public var cornerRadius: CGFloat
         public var isShimmering: Bool
         public var gradient: Gradient?
+        /// For `.actualGlass`: the glass appearance. When nil it is guessed from `color`'s brightness, which picks
+        /// light glass for a translucent bright tint (an accent at low alpha) even in a dark theme.
+        public var isDarkGlass: Bool?
 
         public init(
             style: Style = .legacy,
@@ -381,8 +384,10 @@ public final class ButtonComponent: Component {
             pressedColor: UIColor,
             cornerRadius: CGFloat = 10.0,
             isShimmering: Bool = false,
-            gradient: Gradient? = nil
+            gradient: Gradient? = nil,
+            isDarkGlass: Bool? = nil
         ) {
+            self.isDarkGlass = isDarkGlass
             self.style = style
             self.color = color
             self.foreground = foreground
@@ -400,7 +405,8 @@ public final class ButtonComponent: Component {
                 pressedColor: self.pressedColor,
                 cornerRadius: self.cornerRadius,
                 isShimmering: isShimmering,
-                gradient: self.gradient
+                gradient: self.gradient,
+                isDarkGlass: self.isDarkGlass
             )
         }
     }
@@ -823,7 +829,7 @@ public final class ButtonComponent: Component {
                 } else {
                     tintColor = .init(kind: .panel, innerColor: component.background.color, innerInset: 0.0)
                 }
-                glassContainerView.update(size: size, cornerRadius: cornerRadius, isDark: component.background.color.brightness < 0.2, tintColor: tintColor, isInteractive: true, transition: transition)
+                glassContainerView.update(size: size, cornerRadius: cornerRadius, isDark: component.background.isDarkGlass ?? (component.background.color.brightness < 0.2), tintColor: tintColor, isInteractive: true, transition: transition)
                 contentContainerView = glassContainerView.contentView
                                 
                 transition.setFrame(view: glassContainerView, frame: CGRect(origin: .zero, size: size))
