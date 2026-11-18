@@ -585,12 +585,14 @@ public final class ShareScreen: ViewControllerComponentContainer {
         guard !self.uploadCompleted else { return }
         guard let configuration = self.externalConfiguration else {
             // In the app a `.fromExternal` subject enqueues its own messages: finish as an ordinary send does
-            // (`sender.enqueued`: haptic, `enqueued`/`completed` for the caller's toast, close), without the
+            // (haptic, `enqueued` and `sent` → the caller's `completed`, e.g. its toast, then close), without the
             // extension's loading screen.
             if case .done = status {
                 self.uploadCompleted = true
-                self.sender.enqueued?(self.enqueuingPeerIds, [])
+                let peerIds = self.enqueuingPeerIds
+                self.sender.enqueued?(peerIds, [])
                 HapticFeedback().success()
+                self.sent?(peerIds)
                 self.close()
             }
             return

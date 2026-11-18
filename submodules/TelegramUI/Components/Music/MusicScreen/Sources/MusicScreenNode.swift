@@ -142,7 +142,9 @@ private struct MusicListEntry: Comparable, Identifiable {
         case let .playlistActions(isEmpty, isFavorite):
             return "\(isEmpty) \(isFavorite)"
         case let .track(track, isSelected, isFavorite, isPicked):
-            return "\(track.isSaved) \(String(describing: isSelected)) \(isFavorite) \(String(describing: isPicked))"
+            // Title, artist and cover too: an edit keeps the message id, so without them the row would keep the old text.
+            let cover = track.file?.previewRepresentations.first.flatMap { "\($0.resource.id)" } ?? ""
+            return "\(track.isSaved) \(String(describing: isSelected)) \(isFavorite) \(String(describing: isPicked)) \(track.title) \(track.artist ?? "") \(cover)"
         case let .artist(artist):
             return artist.name
         case let .playlist(playlist, subtitle):

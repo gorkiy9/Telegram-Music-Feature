@@ -685,7 +685,9 @@ public final class MusicScreen: ViewController {
         } else {
             subject = .messages([track.message])
         }
-        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject, hidesSenderNames: true)), in: .window(.root))
+        self.present(self.context.sharedContext.makeShareScreen(context: self.context, params: ShareControllerParams(subject: subject, completed: { [weak self] peerIds in
+            self?.presentForwardedToast(peerIds: peerIds)
+        }, hidesSenderNames: true)), in: .window(.root))
     }
 
     /// Selected tracks are sent like tracks attached in a chat (see `musicShareTracksSubject`).
