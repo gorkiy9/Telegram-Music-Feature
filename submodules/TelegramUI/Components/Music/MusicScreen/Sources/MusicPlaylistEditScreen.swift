@@ -492,7 +492,7 @@ func musicPlaylistEditScreen(context: AccountContext, library: MusicLibrary, pla
             .addTracks(strings.Music_AddTracks)
         ]
         var byId: [EngineMessage.Id: MusicTrack] = [:]
-        for track in library.allTracks {
+        for track in library.playlistTracks {
             byId[track.message.id] = track
         }
         for (index, id) in state.trackIds.enumerated() {

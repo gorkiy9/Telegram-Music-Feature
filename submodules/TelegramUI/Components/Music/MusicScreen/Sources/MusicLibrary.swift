@@ -407,7 +407,28 @@ final class MusicLibrary {
     /// Profile-only and device-only files share one local row id, so they too keep their row across the profile.
     /// `allTracks` as last built, with each file's track: rebuilding the list rewrites every message (edits,
     /// listed dates), and it is read many times per update (player state, queue sync, playlists, every screen).
-    private var cachedAllTracks: (tracks: [MusicTrack], byFileId: [Int64: MusicTrack])?
+    private var cachedAllTracks: (tracks: [MusicTrack], byFileId: [Int64: MusicTrack])? {
+        didSet {
+            if self.cachedAllTracks == nil {
+                self.cachedPlaylistTracks = nil
+            }
+        }
+    }
+    /// The music with every chat's audio, whatever the chosen sources: a playlist keeps its tracks when their chat
+    /// is left out of Music.
+    private var cachedPlaylistTracks: [MusicTrack]?
+
+    var playlistTracks: [MusicTrack] {
+        guard self.sourcePeerIds != nil else {
+            return self.allTracks
+        }
+        if let cached = self.cachedPlaylistTracks {
+            return cached
+        }
+        let tracks = self.buildAllTracks(appliesSources: false)
+        self.cachedPlaylistTracks = tracks
+        return tracks
+    }
 
     var allTracks: [MusicTrack] {
         return self.allTracksCache().tracks
@@ -429,7 +450,7 @@ final class MusicLibrary {
         return cached
     }
 
-    private func buildAllTracks() -> [MusicTrack] {
+    private func buildAllTracks(appliesSources: Bool = true) -> [MusicTrack] {
         var addedTimestamps: [Int64: Int32] = [:]
         for added in self.addedFiles {
             addedTimestamps[added.file.fileId.id] = added.timestamp
@@ -438,7 +459,7 @@ final class MusicLibrary {
         var fileIds = Set<Int64>()
         var tracks: [MusicTrack] = []
         for message in self.chatMessages {
-            if let sourcePeerIds = self.sourcePeerIds, !sourcePeerIds.contains(message.id.peerId) {
+            if appliesSources, let sourcePeerIds = self.sourcePeerIds, !sourcePeerIds.contains(message.id.peerId) {
                 continue
             }
             guard let fileId = musicFileId(message)?.id, !self.removedFileIds.contains(fileId), fileIds.insert(fileId).inserted else {
@@ -875,7 +896,7 @@ final class MusicLibrary {
     /// A track whose row id changed (its file now listed from another source) keeps its place in playlists.
     private func followMovedTracks() {
         var current: [Int64: EngineMessage.Id] = [:]
-        for track in self.allTracks {
+        for track in self.playlistTracks {
             if let fileId = musicFileId(track.message), current[fileId.id] == nil {
                 current[fileId.id] = track.message.id
                 self.listedFileIdByMessageId[track.message.id] = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
@@ -912,7 +933,7 @@ final class MusicLibrary {
 
     private func trackMessageIdsByFile() -> [MusicStoredPlaylists.FileId: EngineMessage.Id] {
         var messageIds: [MusicStoredPlaylists.FileId: EngineMessage.Id] = [:]
-        for track in self.allTracks {
+        for track in self.playlistTracks {
             if let fileId = musicFileId(track.message) {
                 let key = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
                 if messageIds[key] == nil {
@@ -929,7 +950,7 @@ final class MusicLibrary {
             return
         }
         var fileIds: [EngineMessage.Id: MusicStoredPlaylists.FileId] = [:]
-        for track in self.allTracks {
+        for track in self.playlistTracks {
             if let fileId = musicFileId(track.message) {
                 fileIds[track.message.id] = MusicStoredPlaylists.FileId(namespace: fileId.namespace, id: fileId.id)
             }
@@ -1040,9 +1061,10 @@ final class MusicLibrary {
         })
     }
 
-    /// Tracks in the playlist's own order; a track that left the music leaves the playlist's list too.
+    /// Tracks in the playlist's own order; a track that left the music leaves the playlist's list too. The chosen
+    /// source chats do not apply: they decide what Music lists, not what a playlist holds.
     func tracks(of playlist: MusicPlaylist) -> [MusicTrack] {
-        let tracks = self.allTracks
+        let tracks = self.playlistTracks
         var byId: [EngineMessage.Id: MusicTrack] = [:]
         for track in tracks {
             byId[track.message.id] = track
@@ -1758,7 +1780,7 @@ final class MusicLibrary {
         // reload, while the player keeps the message it started with.
         var tracksById: [EngineMessage.Id: EngineRawMessage] = [:]
         var tracksByFileId: [Int64: EngineRawMessage] = [:]
-        for track in self.allTracks {
+        for track in self.playlistTracks {
             tracksById[track.message.id] = track.message
             if let fileId = musicFileId(track.message)?.id {
                 tracksByFileId[fileId] = track.message
