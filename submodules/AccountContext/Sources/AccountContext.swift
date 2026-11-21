@@ -1819,8 +1819,9 @@ public protocol SharedAccountContext: AnyObject {
     func switchToAccount(id: AccountRecordId, fromSettingsController settingsController: ViewController?, withChatListController chatListController: ViewController?)
     func beginNewAuth(testingEnvironment: Bool)
     
-    /// Music section concept: what a playlist shared into a chat asks of the Music section.
-    func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction)
+    /// Music section concept: what a playlist shared into a chat asks of the Music section. The message tells whose
+    /// playlist it is: the account's own is looked up in Music, another user's plays from the message.
+    func handleMusicSharedPlaylist(context: AccountContext, message: EngineRawMessage, action: MusicSharedPlaylistAction)
     /// Music section concept: Show All of a group of tracks in a chat, every track of the group in a sheet.
     func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage])
     /// Music section concept: puts the tracks in Music (on this device, the profile is not touched) and shows a toast.
@@ -1845,7 +1846,7 @@ public enum MusicSharedPlaylistAction {
 }
 
 public extension SharedAccountContext {
-    func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction) {
+    func handleMusicSharedPlaylist(context: AccountContext, message: EngineRawMessage, action: MusicSharedPlaylistAction) {
     }
 
     func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage]) {

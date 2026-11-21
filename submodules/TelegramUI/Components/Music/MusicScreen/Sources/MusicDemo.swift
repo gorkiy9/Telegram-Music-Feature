@@ -91,7 +91,7 @@ enum MusicDemo {
     private static let lofiBot = musicDemoPeerId(index: 6, isGroup: false)
     private static let indieBot = musicDemoPeerId(index: 7, isGroup: false)
 
-    /// Anna's playlist in her chat: hers, so it is not among the account's playlists.
+    /// Anna's playlist in her chat: hers, so Music lists it only once it is saved there.
     static let foreignPlaylistId = 900
     private static let foreignPlaylistTitle = "Road Trip"
     private static let foreignPlaylistTracks = [0, 11, 14, 6, 10, 3]
@@ -231,29 +231,6 @@ enum MusicDemo {
 
     private static func coverRepresentation(fileId: Int64) -> TelegramMediaImageRepresentation {
         return TelegramMediaImageRepresentation(dimensions: PixelDimensions(width: 600, height: 600), resource: LocalFileMediaResource(fileId: fileId), progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
-    }
-
-    /// Who a playlist belongs to when it is not the account's: Anna's playlist from her chat.
-    static func ownerPeerId(playlistId: Int) -> EnginePeer.Id? {
-        guard isMusicDemoBuild, playlistId == MusicDemo.foreignPlaylistId else {
-            return nil
-        }
-        return MusicDemo.anna
-    }
-
-    /// Anna's playlist, made of tracks that are also in the account's Music, so it plays from her bubble.
-    static func foreignPlaylist(id: Int, library: MusicLibrary) -> MusicPlaylist? {
-        guard id == MusicDemo.foreignPlaylistId else {
-            return nil
-        }
-        var trackIds: [EngineMessage.Id] = []
-        for index in MusicDemo.foreignPlaylistTracks {
-            if let track = library.track(fileId: audioFileId(index)) {
-                trackIds.append(track.message.id)
-            }
-        }
-        let now = Int32(Date().timeIntervalSince1970)
-        return MusicPlaylist(id: id, title: MusicDemo.foreignPlaylistTitle, description: "", isFavorite: false, trackIds: trackIds, cover: coverRepresentation(fileId: playlistCoverFileId(MusicDemo.foreignPlaylistCoverIndex)), dateAdded: now, dateUpdated: now)
     }
 
     // MARK: Preparing

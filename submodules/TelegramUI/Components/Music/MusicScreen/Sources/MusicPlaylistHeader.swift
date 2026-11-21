@@ -599,6 +599,8 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
         case play
         case shuffle
         case favorite
+        /// Another user's playlist not in Music: the favorite's place adds it there.
+        case saveToMusic
         case search
         case addTracks
         /// The track picker's Add: every track of the playlist.
@@ -610,6 +612,7 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
     let theme: PresentationTheme
     let isEmpty: Bool
     let isFavorite: Bool
+    let canSaveToMusic: Bool
     let playTitle: String
     let addTracksTitle: String
     /// Set on a playlist opened inside the track picker: one full-width Add button for all its tracks (Figma Playlists / Add Track 176:29747).
@@ -621,10 +624,11 @@ final class MusicPlaylistActionsItem: ListViewItem, ItemListItem {
 
     let selectable: Bool = false
 
-    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, playTitle: String, addTracksTitle: String, pickerAddTitle: String? = nil, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
+    init(theme: PresentationTheme, isEmpty: Bool, isFavorite: Bool, canSaveToMusic: Bool = false, playTitle: String, addTracksTitle: String, pickerAddTitle: String? = nil, topInset: CGFloat, bottomInset: CGFloat, sectionId: ItemListSectionId, action: @escaping (Action) -> Void) {
         self.theme = theme
         self.isEmpty = isEmpty
         self.isFavorite = isFavorite
+        self.canSaveToMusic = canSaveToMusic
         self.playTitle = playTitle
         self.addTracksTitle = addTracksTitle
         self.pickerAddTitle = pickerAddTitle
@@ -787,10 +791,15 @@ final class MusicPlaylistActionsItemNode: ListViewItemNode {
                 // accent colour on accent-tinted glass.
                 let accentGlass = theme.list.itemAccentColor.withMultipliedAlpha(0.1)
                 let favoriteBackground = item.isFavorite ? ButtonComponent.Background(style: .actualGlass, color: accentGlass, foreground: theme.list.itemAccentColor, pressedColor: accentGlass, cornerRadius: height * 0.5, isDarkGlass: theme.overallDarkAppearance) : glassBackground
-                let favoriteContent = iconContent(item.isFavorite ? "Music/StarSlash" : "Music/Star", 24.0, item.isFavorite ? theme.list.itemAccentColor : foreground)
+                let favoriteContent: AnyComponentWithIdentity<Empty>
+                if item.canSaveToMusic {
+                    favoriteContent = iconContent("Chat/Context Menu/AddMusic", 24.0, foreground)
+                } else {
+                    favoriteContent = iconContent(item.isFavorite ? "Music/StarSlash" : "Music/Star", 24.0, item.isFavorite ? theme.list.itemAccentColor : foreground)
+                }
                 let favoriteChanged = self.favoriteContentId != nil && self.favoriteContentId != favoriteContent.id
                 self.favoriteContentId = favoriteContent.id
-                self.updateButton(self.favoriteButton, background: favoriteBackground, content: favoriteContent, frame: CGRect(origin: CGPoint(x: x, y: 0.0), size: roundSize), action: .favorite)
+                self.updateButton(self.favoriteButton, background: item.canSaveToMusic ? glassBackground : favoriteBackground, content: favoriteContent, frame: CGRect(origin: CGPoint(x: x, y: 0.0), size: roundSize), action: item.canSaveToMusic ? .saveToMusic : .favorite)
                 if favoriteChanged && self.pendingFavoriteBounce {
                     self.pendingFavoriteBounce = false
                     MusicButtonIconAnimation.bounce(in: self.favoriteButton.view)

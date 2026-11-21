@@ -167,13 +167,42 @@ private final class MusicSharedPlaylistReferenceContentSource: ContextReferenceC
     }
 }
 
+/// The playlist a message carries. One the account shared is looked up in Music by its id; another user's
+/// (their message, or a forward of it) is built from the message itself, so it plays without the sender's library.
+func musicSharedPlaylist(context: AccountContext, library: MusicLibrary, message: EngineRawMessage) -> MusicPlaylist? {
+    var found: (content: TelegramMediaWebpageLoadedContent, attribute: TelegramMediaWebpageMusicPlaylistAttribute)?
+    for media in message.media {
+        guard let webpage = media as? TelegramMediaWebpage, case let .Loaded(content) = webpage.content else {
+            continue
+        }
+        for attribute in content.attributes {
+            if case let .musicPlaylist(playlist) = attribute {
+                found = (content, playlist)
+            }
+        }
+    }
+    guard let found else {
+        return nil
+    }
+    let content = found.content
+    let attribute = found.attribute
+    let ownerPeer = message.forwardInfo?.author ?? message.author
+    guard let ownerPeer, ownerPeer.id != context.account.peerId else {
+        return library.playlist(id: Int(attribute.playlistId))
+    }
+    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+    let peerName = EnginePeer(ownerPeer).displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
+    let owner = MusicPlaylistOwner(peerId: ownerPeer.id, name: peerName.isEmpty ? (content.author ?? "") : peerName, playlistId: attribute.playlistId)
+    return library.foreignPlaylist(owner: owner, title: content.title ?? "", description: content.text ?? "", cover: content.image?.representations.last, files: attribute.files)
+}
+
 extension MusicPlayerSupport {
-    /// The actions of a playlist bubble. The playlist is looked up in this device's library: the API has no
-    /// playlists, so only one shared from here can be played or opened.
-    public static func handleSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction) {
+    /// The actions of a playlist bubble. The account's own playlist is looked up in this device's library: the API
+    /// has no playlists, so only one shared from here can be played or opened. Another user's plays from the message.
+    public static func handleSharedPlaylist(context: AccountContext, message: EngineRawMessage, action: MusicSharedPlaylistAction) {
         let library = MusicLibrary.shared(context: context)
         let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
-        guard let playlist = library.playlist(id: Int(playlistId)) else {
+        guard let playlist = musicSharedPlaylist(context: context, library: library, message: message) else {
             MusicPlayerSupport.toast(context: context, text: strings.Music_PlaylistIsUnavailable, iconName: "Music/Playlists")
             return
         }
@@ -197,7 +226,7 @@ extension MusicPlayerSupport {
                     action()
                 }))
             }
-            let items: [ContextMenuItem] = [
+            var items: [ContextMenuItem] = [
                 item(strings.Music_Play2, "Chat/Context Menu/Play", {
                     sharedPlaylistPlay(context: context, library: library, playlist: playlist, shuffled: false, fileId: nil)
                 }),
@@ -211,14 +240,48 @@ extension MusicPlayerSupport {
                 item(strings.Music_AddToQueue, "Chat/Context Menu/MoveDown", {
                     sharedPlaylistEnqueue(context: context, library: library, playlist: playlist, next: false)
                 }),
-                .separator,
-                item(strings.Music_OpenPlaylist, "Music/Playlists", {
-                    MusicPlayerSupport.handleSharedPlaylist(context: context, playlistId: playlistId, action: .open)
-                })
+                .separator
             ]
+            if library.canSaveToMusic(playlist) {
+                items.append(item(strings.Music_AddToMusic, "Chat/Context Menu/AddMusic", {
+                    MusicPlayerSupport.saveToMusic(context: context, playlistId: playlist.id)
+                }))
+            }
+            items.append(item(strings.Music_OpenPlaylist, "Music/Playlists", {
+                MusicPlayerSupport.handleSharedPlaylist(context: context, message: message, action: .open)
+            }))
             let controller = makeContextController(context: context, presentationData: presentationData, source: .reference(MusicSharedPlaylistReferenceContentSource(sourceView: sourceView)), items: .single(ContextController.Items(content: .list(items))), recognizer: nil, gesture: nil)
             context.sharedContext.mainWindow?.presentInGlobalOverlay(controller)
         }
+    }
+
+    /// Another user's playlist goes to Music with its tracks, from its message, its screen or the queue it plays in.
+    static func saveToMusic(context: AccountContext, playlistId: Int) {
+        let library = MusicLibrary.shared(context: context)
+        guard let playlist = library.playlist(id: playlistId), library.canSaveToMusic(playlist) else {
+            return
+        }
+        library.saveToMusic(playlistId: playlistId)
+        let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
+        MusicPlayerSupport.toast(context: context, text: strings.Music_PlaylistWasAddedToYourLibrary, iconName: "Chat/Context Menu/AddMusic")
+    }
+
+    /// Whether the queue's playlist is another user's that is not in Music yet: the player's queue menu offers to add it.
+    public static func canSavePlaylistToMusic(context: AccountContext, id: Int) -> Bool {
+        let library = MusicLibrary.shared(context: context)
+        guard let playlist = library.playlist(id: id) else {
+            return false
+        }
+        return library.canSaveToMusic(playlist)
+    }
+
+    /// The owner's name of another user's playlist; nil for the account's own.
+    public static func playlistOwnerName(context: AccountContext, id: Int) -> String? {
+        return MusicLibrary.shared(context: context).playlist(id: id)?.owner?.name
+    }
+
+    public static func savePlaylistToMusic(context: AccountContext, id: Int) {
+        MusicPlayerSupport.saveToMusic(context: context, playlistId: id)
     }
 }
 

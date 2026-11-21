@@ -70,7 +70,7 @@ private enum MusicListEntryContent {
     /// header's, so folding the cover animates this row's height and the offset the header follows stays continuous.
     case playlistHeaderSpacer(CGFloat)
     case playlistInfo(String)
-    case playlistActions(isEmpty: Bool, isFavorite: Bool)
+    case playlistActions(isEmpty: Bool, isFavorite: Bool, canSaveToMusic: Bool)
     /// `isSelected` is nil outside of selection, `isPicked` outside of the track picker.
     case track(MusicTrack, isSelected: Bool?, isFavorite: Bool, isPicked: Bool?)
     case artist(MusicArtist)
@@ -139,8 +139,8 @@ private struct MusicListEntry: Comparable, Identifiable {
             return "\(height)"
         case let .playlistInfo(text), let .emptyInfo(text):
             return text
-        case let .playlistActions(isEmpty, isFavorite):
-            return "\(isEmpty) \(isFavorite)"
+        case let .playlistActions(isEmpty, isFavorite, canSaveToMusic):
+            return "\(isEmpty) \(isFavorite) \(canSaveToMusic)"
         case let .track(track, isSelected, isFavorite, isPicked):
             // Title, artist and cover too: an edit keeps the message id, so without them the row would keep the old text.
             let cover = track.file?.previewRepresentations.first.flatMap { "\($0.resource.id)" } ?? ""
@@ -344,11 +344,8 @@ final class MusicScreenNode: ASDisplayNode {
                 self?.openPlaylistAuthor()
             }
 
-            // A demo friend's playlist from a chat is hers; any other playlist is the account's.
-            var ownerPeerId = context.account.peerId
-            if case let .playlist(playlistId) = self.section, let foreignOwnerId = MusicDemo.ownerPeerId(playlistId: playlistId) {
-                ownerPeerId = foreignOwnerId
-            }
+            // Another user's playlist names them; any other playlist is the account's.
+            let ownerPeerId = self.currentPlaylist?.owner?.peerId ?? context.account.peerId
             self.playlistOwnerDisposable = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: ownerPeerId))
             |> deliverOnMainQueue).start(next: { [weak self] peer in
                 guard let self, let peer else {
@@ -895,11 +892,11 @@ final class MusicScreenNode: ASDisplayNode {
                 if !description.isEmpty {
                     contents.append((.playlistInfo, .playlistInfo(description), nil))
                 }
-                contents.append((.playlistActions, .playlistActions(isEmpty: self.currentTracks.isEmpty, isFavorite: playlist.isFavorite), nil))
+                contents.append((.playlistActions, .playlistActions(isEmpty: self.currentTracks.isEmpty, isFavorite: playlist.isFavorite, canSaveToMusic: self.library.canSaveToMusic(playlist)), nil))
             } else {
                 if self.picker != nil, !self.currentTracks.isEmpty {
                     // A playlist opened in the picker: Add and Search under the header (Figma Playlists / Add Track).
-                    contents.append((.playlistActions, .playlistActions(isEmpty: false, isFavorite: false), nil))
+                    contents.append((.playlistActions, .playlistActions(isEmpty: false, isFavorite: false, canSaveToMusic: false), nil))
                 }
                 appendPlaybackPanel(self.currentTracks)
             }
@@ -1255,6 +1252,10 @@ final class MusicScreenNode: ASDisplayNode {
                 self?.addToPlaylist(track: track)
             })
         ]
+        if let playlist = self.currentPlaylist, self.library.canSaveToMusic(playlist) {
+            // Another user's playlist not in Music: its tracks may not be there either, so nothing to edit or delete.
+            return (left, [])
+        }
         if self.isOwnProfile {
             // The profile's list: the destructive swipe takes the track out of the profile, Music keeps it.
             return (left, [
@@ -1367,7 +1368,7 @@ final class MusicScreenNode: ASDisplayNode {
             }))
         }
         items.append(.separator)
-        if case let .playlist(playlistId) = self.section, self.picker == nil {
+        if case let .playlist(playlistId) = self.section, self.picker == nil, self.currentPlaylist?.isForeign != true {
             // Figma 247:17292: takes the track out of this playlist only, the track stays in Music.
             items.append(action(strings.Music_RemoveFromPlaylist, .singleLine, "Chat/Context Menu/Remove", true, {
                 let messageId = track.message.id
@@ -1597,13 +1598,13 @@ final class MusicScreenNode: ASDisplayNode {
         return false
     }
 
-    private func playlistActionsItem(isEmpty: Bool, isFavorite: Bool) -> ListViewItem {
+    private func playlistActionsItem(isEmpty: Bool, isFavorite: Bool, canSaveToMusic: Bool) -> ListViewItem {
         let strings = self.presentationData.strings
         let hasDescription = !(self.currentPlaylist?.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         // The round header already ends 16 pt under the name; under the cover and the description the buttons keep 16 pt of their own.
         let topInset: CGFloat = self.picker != nil ? 16.0 : (!hasDescription && !self.isPlaylistHeaderExpanded ? 8.0 : 16.0)
         let pickerAddTitle: String? = self.picker != nil ? strings.Music_AddThisPlaylist : nil
-        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, playTitle: strings.Music_Play2, addTracksTitle: strings.Music_AddTracks, pickerAddTitle: pickerAddTitle, topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
+        return MusicPlaylistActionsItem(theme: self.presentationData.theme, isEmpty: isEmpty, isFavorite: isFavorite, canSaveToMusic: canSaveToMusic, playTitle: strings.Music_Play2, addTracksTitle: strings.Music_AddTracks, pickerAddTitle: pickerAddTitle, topInset: topInset, bottomInset: 16.0, sectionId: 3, action: { [weak self] action in
             guard let self, let playlist = self.currentPlaylist else {
                 return
             }
@@ -1614,6 +1615,8 @@ final class MusicScreenNode: ASDisplayNode {
                 self.playAll(shuffled: true)
             case .favorite:
                 self.controller?.setFavorite(playlist: playlist, isFavorite: !playlist.isFavorite, library: self.library)
+            case .saveToMusic:
+                MusicPlayerSupport.saveToMusic(context: self.context, playlistId: playlist.id)
             case .search:
                 self.setPlaylistSearchActive(true)
             case .addTracks:
@@ -1693,7 +1696,7 @@ final class MusicScreenNode: ASDisplayNode {
                 action()
             }))
         }
-        let items: [ContextMenuItem] = [
+        var items: [ContextMenuItem] = [
             .custom(MusicTrackActionsContextItem(actions: [
                 MusicTrackActionsContextItem.Action(
                     title: playlist.isInProfile ? strings.Music_Remove : strings.Music_ToProfile,
@@ -1745,6 +1748,10 @@ final class MusicScreenNode: ASDisplayNode {
                 controller?.confirmRemoval(playlist: playlist, library: library)
             })
         ]
+        if playlist.isForeign {
+            // Another user's playlist is never edited: Edit and its separator go.
+            items.removeSubrange(2 ... 3)
+        }
         let contextController = makeContextController(presentationData: self.presentationData, source: .extracted(MusicTrackContextExtractedContentSource(contentNode: sourceNode)), items: .single(ContextController.Items(content: .list(items))), recognizer: nil, gesture: gesture)
         controller.presentInGlobalOverlay(contextController)
     }
@@ -1789,8 +1796,8 @@ final class MusicScreenNode: ASDisplayNode {
             return MusicPlaylistSpacerItem(height: height)
         case let .playlistInfo(text):
             return MusicPlaylistInfoItem(presentationData: ItemListPresentationData(self.presentationData), label: self.presentationData.strings.Music_Description2, text: text, sectionId: 4)
-        case let .playlistActions(isEmpty, isFavorite):
-            return self.playlistActionsItem(isEmpty: isEmpty, isFavorite: isFavorite)
+        case let .playlistActions(isEmpty, isFavorite, canSaveToMusic):
+            return self.playlistActionsItem(isEmpty: isEmpty, isFavorite: isFavorite, canSaveToMusic: canSaveToMusic)
         case let .track(track, isSelected, isFavorite, isPicked):
             return self.trackItem(track: track, isSelected: isSelected, isFavorite: isFavorite, isPicked: isPicked, header: header)
         case let .artist(artist):
@@ -2073,18 +2080,32 @@ final class MusicScreenNode: ASDisplayNode {
             }))
         }
         let hasTracks = !library.tracks(of: playlist).isEmpty
-        var items: [ContextMenuItem] = [
-            playlist.isInProfile ? action(strings.Music_RemoveFromProfile, "Chat/Context Menu/Remove", false, { [weak controller] in
+        // Another user's playlist is never edited; until it is in Music it offers Add to Music in place of the
+        // profile, and nothing to remove.
+        let canSaveToMusic = library.canSaveToMusic(playlist)
+        let context = self.context
+        var items: [ContextMenuItem] = []
+        if canSaveToMusic {
+            items.append(action(strings.Music_AddToMusic, "Chat/Context Menu/AddMusic", false, {
+                MusicPlayerSupport.saveToMusic(context: context, playlistId: playlist.id)
+            }))
+        } else {
+            items.append(playlist.isInProfile ? action(strings.Music_RemoveFromProfile, "Chat/Context Menu/Remove", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: false, library: library)
             }) : action(strings.Music_AddToProfile, "Music/AddToProfile", false, { [weak controller] in
                 controller?.setInProfile(playlist: playlist, isInProfile: true, library: library)
-            }),
-            .separator,
-            action(strings.Music_Edit, "Chat/Context Menu/Edit", false, { [weak controller] in
+            }))
+        }
+        if !playlist.isForeign {
+            items.append(.separator)
+            items.append(action(strings.Music_Edit, "Chat/Context Menu/Edit", false, { [weak controller] in
                 controller?.editPlaylist(playlist, library: library)
-            })
-        ]
+            }))
+        }
         if hasTracks {
+            if playlist.isForeign {
+                items.append(.separator)
+            }
             // Sorting opens as a submenu, the way the client's menus step into a second level.
             items.append(.action(ContextMenuActionItem(text: strings.Music_Sort, icon: { theme in
                 return generateTintedImage(image: UIImage(bundleImageName: "Music/Sort"), color: theme.contextMenu.primaryColor)
@@ -2107,10 +2128,12 @@ final class MusicScreenNode: ASDisplayNode {
                 controller?.enqueue(playlist: playlist, next: false, library: library)
             }))
         }
-        items.append(.separator)
-        items.append(action(strings.Music_RemoveFromMusic, "Chat/Context Menu/Delete", true, { [weak controller] in
-            controller?.confirmRemoval(playlist: playlist, library: library)
-        }))
+        if !canSaveToMusic {
+            items.append(.separator)
+            items.append(action(strings.Music_RemoveFromMusic, "Chat/Context Menu/Delete", true, { [weak controller] in
+                controller?.confirmRemoval(playlist: playlist, library: library)
+            }))
+        }
         let contextController = makeContextController(presentationData: self.presentationData, source: .reference(MusicContextReferenceContentSource(sourceView: sourceView)), items: .single(ContextController.Items(content: .list(items))), gesture: nil)
         controller.presentInGlobalOverlay(contextController)
     }
@@ -2205,7 +2228,7 @@ final class MusicScreenNode: ASDisplayNode {
             rightButtons = []
         case .playlist:
             title = self.currentPlaylist?.title ?? strings.Music_Playlist
-            rightButtons = [
+            rightButtons = self.currentPlaylist?.isForeign == true ? [] : [
                 NavigationBarComponent.Button(id: "editPlaylist", content: .text(title: strings.Music_Edit2, isBold: false), action: { [weak self] _ in
                     guard let self, let playlist = self.currentPlaylist else {
                         return
@@ -2607,7 +2630,7 @@ final class MusicScreenNode: ASDisplayNode {
         // as a forwarded message does.
         let trackCountText = musicTrackCountString(self.presentationData.strings, self.library.tracks(of: playlist).count)
         var headerAuthor: MusicPlaylistHeaderView.Author?
-        if isSheet, let peer = self.playlistOwnerPeer {
+        if isSheet || playlist.isForeign, let peer = self.playlistOwnerPeer {
             let nameColor: UIColor
             switch peer.nameColor {
             case let .preset(color):

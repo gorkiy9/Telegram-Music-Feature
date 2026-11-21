@@ -640,10 +640,10 @@ public class ChatMessageMusicPlaylistBubbleContentNode: ChatMessageBubbleContent
     }
 
     private func perform(_ action: MusicSharedPlaylistAction) {
-        guard let item = self.item, let playlistId = self.playlistId else {
+        guard let item = self.item, self.playlistId != nil else {
             return
         }
-        item.context.sharedContext.handleMusicSharedPlaylist(context: item.context, playlistId: playlistId, action: action)
+        item.context.sharedContext.handleMusicSharedPlaylist(context: item.context, message: item.message, action: action)
     }
 
     @objc private func morePressed() {

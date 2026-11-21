@@ -4968,8 +4968,8 @@ public final class SharedAccountContextImpl: SharedAccountContext {
         })
     }
     
-    public func handleMusicSharedPlaylist(context: AccountContext, playlistId: Int64, action: MusicSharedPlaylistAction) {
-        MusicPlayerSupport.handleSharedPlaylist(context: context, playlistId: playlistId, action: action)
+    public func handleMusicSharedPlaylist(context: AccountContext, message: EngineRawMessage, action: MusicSharedPlaylistAction) {
+        MusicPlayerSupport.handleSharedPlaylist(context: context, message: message, action: action)
     }
 
     public func openMusicTrackGroup(context: AccountContext, messages: [EngineRawMessage]) {

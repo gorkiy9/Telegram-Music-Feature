@@ -1528,7 +1528,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             kind = .chat(peer.id)
         case let .profile(peer):
             kind = .profile(peer.id)
-        case let .ownPlaylist(id):
+        case let .musicPlaylist(id):
             kind = .playlist(id)
         case let .artist(name):
             kind = .artist(name)
@@ -1763,7 +1763,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
     private enum QueueSource {
         /// Library tracks that make no list of their own, or a list with nowhere to lead.
         case tracks
-        case ownPlaylist(Int)
+        case musicPlaylist(Int)
         case artist(String)
         case chat(EnginePeer)
         /// A profile's music: someone's own list of tracks.
@@ -1776,7 +1776,7 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
             case .tracks:
                 return .tracks
             case let .playlist(id):
-                return MusicPlayerSupport.playlistExists(context: self.context, id: id) ? .ownPlaylist(id) : .tracks
+                return MusicPlayerSupport.playlistExists(context: self.context, id: id) ? .musicPlaylist(id) : .tracks
             case let .artist(name):
                 return .artist(name)
             case let .chat(peerId):
@@ -1827,8 +1827,15 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         
         var listItems: [ContextMenuItem] = []
         var offersNewPlaylist = true
-        if case .ownPlaylist = source {
+        if case let .musicPlaylist(id) = source {
             offersNewPlaylist = false
+            // Another user's playlist from a chat that is not in Music yet: the queue can add it there.
+            if MusicPlayerSupport.canSavePlaylistToMusic(context: context, id: id) {
+                listItems.append(.action(ContextMenuActionItem(text: strings.Music_AddToMusic, icon: icon("Chat/Context Menu/AddMusic"), action: { _, f in
+                    f(.default)
+                    MusicPlayerSupport.savePlaylistToMusic(context: context, id: id)
+                })))
+            }
         }
         if offersNewPlaylist && !messages.isEmpty {
             listItems.append(.action(ContextMenuActionItem(text: strings.Music_NewPlaylist, icon: icon("Music/NoteList"), action: { [weak self] _, f in
@@ -1866,8 +1873,8 @@ final class OverlayAudioPlayerControllerNode: ViewControllerTracingNode, ASGestu
         switch source {
         case .tracks:
             break
-        case let .ownPlaylist(id):
-            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToPlaylist, textLayout: .secondLineWithValue(MusicPlayerSupport.libraryTitle(strings: strings)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
+        case let .musicPlaylist(id):
+            goToItem = .action(ContextMenuActionItem(text: strings.Music_GoToPlaylist, textLayout: .secondLineWithValue(MusicPlayerSupport.playlistOwnerName(context: context, id: id) ?? MusicPlayerSupport.libraryTitle(strings: strings)), icon: icon("Music/Playlists"), action: { [weak self] _, f in
                 f(.dismissWithoutContent)
                 self?.requestDismiss()
                 MusicPlayerSupport.openPlaylist(context: context, id: id)

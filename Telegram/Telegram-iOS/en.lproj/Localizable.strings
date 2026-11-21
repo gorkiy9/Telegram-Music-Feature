@@ -17492,6 +17492,7 @@ Error: %8$@";
 "Music.TrackCount_1" = "%@ track";
 "Music.TrackCount_any" = "%@ tracks";
 "Music.AddToMusic" = "Add to Music";
+"Music.PlaylistWasAddedToYourLibrary" = "The playlist was added to your library";
 "Music.SetAsPlaylistCover" = "Set as Playlist Cover";
 "Music.SetAsTrackCover" = "Set as Track Cover";
 "Music.CoverPickerSubtitle" = "Set new cover";

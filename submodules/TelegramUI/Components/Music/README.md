@@ -25,6 +25,7 @@ Telegram is already where many people keep their music: tracks in channels, grou
 - Create and edit with cover, description and reorderable tracks; add to profile.
 - Playlist screen with a profile-style collapsing header (cover → avatar into the Dynamic Island).
 - Sharing a playlist sends a playlist bubble (`ChatMessageMusicPlaylistBubbleContentNode`) that opens as a sheet.
+- Another user's playlist (`MusicPlaylistOwner`, taken from the bubble's message) is read-only and names its author; Add to Music in its menu, header, bubble and the player's queue menu saves it with its tracks.
 
 **Player** (`OverlayAudioPlayerControlsNode`, `MusicPlayerQueueList`)
 - Compact player sheet with add to Music, favorite, add to playlist.
@@ -49,6 +50,7 @@ The server is not touched. Whatever the API does not support is stored locally (
 | Playlists (name, description, cover, track order) | item cache | `music.getPlaylists`, `music.createPlaylist`, `music.editPlaylist`, `music.deletePlaylist`, `music.reorderPlaylistTracks` |
 | Playlist in profile | local flag | `music.togglePlaylistInProfile` + playlists on `userFull` |
 | Sharing a playlist | local webpage of type `telegram_music_playlist` (test chat only) | `inputMediaMusicPlaylist` / `messageMediaMusicPlaylist` |
+| Another user's playlist, saved to Music | item cache, owner peer id + their playlist id | `music.getPlaylist(owner, id)`, `music.savePlaylist` / `music.unsavePlaylist`, owner on `musicPlaylist` |
 | Favorites | item cache | `music.saveFavorite`, `music.getFavorites` |
 | Library state (hidden tracks, added files, sources) | item cache | `music.getLibrary`, `music.editLibrary`, `music.setSources` |
 | Track title / artist / cover edits | local overrides | `music.editTrackMetadata` (per user) |

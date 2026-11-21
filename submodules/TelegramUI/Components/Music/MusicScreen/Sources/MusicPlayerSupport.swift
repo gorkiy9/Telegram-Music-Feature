@@ -53,6 +53,9 @@ func musicOwnMusicQueueTitle(strings: PresentationStrings) -> String {
 }
 
 func musicPlaylistQueueTitle(strings: PresentationStrings, playlist: MusicPlaylist) -> String {
+    if playlist.isForeign {
+        return playlist.title
+    }
     return strings.Music_YourPlaylist(playlist.title).string
 }
 

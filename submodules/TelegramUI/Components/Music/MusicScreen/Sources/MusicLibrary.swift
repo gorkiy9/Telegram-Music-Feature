@@ -91,6 +91,21 @@ struct MusicPlaylist: Equatable {
     var coverMarkup: TelegramMediaImage.EmojiMarkup? = nil
     let dateAdded: Int32
     var dateUpdated: Int32
+    /// Another user's playlist: nil for the account's own ones.
+    var owner: MusicPlaylistOwner? = nil
+
+    /// Not the account's: it cannot be edited, only played, saved to Music and taken out of it again.
+    var isForeign: Bool {
+        return self.owner != nil
+    }
+}
+
+/// Who made a playlist that came from another user's message, and its id on their side: a playlist saved to Music
+/// is found again by the pair, so its message opens the saved copy.
+struct MusicPlaylistOwner: Equatable {
+    let peerId: EnginePeer.Id
+    let name: String
+    let playlistId: Int64
 }
 
 /// Which tracks a list shows.
@@ -159,6 +174,10 @@ private struct MusicStoredPlaylists: Codable {
         let coverEmoji: CoverEmoji?
         let dateAdded: Int32
         let dateUpdated: Int32
+        /// Set on another user's playlist saved to Music; absent in playlists stored before there were any.
+        let ownerPeerId: Int64?
+        let ownerName: String?
+        let ownerPlaylistId: Int64?
     }
 
     /// `TelegramMediaImage.EmojiMarkup`: an emoji by file id, or a sticker when the pack is set.
@@ -844,10 +863,14 @@ final class MusicLibrary {
                     return TelegramMediaImage.EmojiMarkup(content: .emoji(fileId: emoji.fileId), backgroundColors: emoji.backgroundColors)
                 }
                 self.pendingPlaylistFileIds[Int(playlist.id)] = playlist.fileIds
-                return MusicPlaylist(id: Int(playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: [], cover: cover, coverMarkup: cover != nil ? coverMarkup : nil, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+                var owner: MusicPlaylistOwner?
+                if let ownerPeerId = playlist.ownerPeerId, let ownerPlaylistId = playlist.ownerPlaylistId {
+                    owner = MusicPlaylistOwner(peerId: EnginePeer.Id(ownerPeerId), name: playlist.ownerName ?? "", playlistId: ownerPlaylistId)
+                }
+                return MusicPlaylist(id: Int(playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: [], cover: cover, coverMarkup: cover != nil ? coverMarkup : nil, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated, owner: owner)
             }
             for var playlist in createdMeanwhile {
-                playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: playlist.trackIds, cover: playlist.cover, coverMarkup: playlist.coverMarkup, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+                playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, trackIds: playlist.trackIds, cover: playlist.cover, coverMarkup: playlist.coverMarkup, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated, owner: playlist.owner)
                 self.playlists.append(playlist)
             }
             if !createdMeanwhile.isEmpty {
@@ -980,7 +1003,7 @@ final class MusicLibrary {
                     }
                 }
             }
-            return MusicStoredPlaylists.Playlist(id: Int32(clamping: playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, fileIds: playlistFileIds, cover: cover, coverEmoji: coverEmoji, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated)
+            return MusicStoredPlaylists.Playlist(id: Int32(clamping: playlist.id), title: playlist.title, description: playlist.description, isFavorite: playlist.isFavorite, isInProfile: playlist.isInProfile, fileIds: playlistFileIds, cover: cover, coverEmoji: coverEmoji, dateAdded: playlist.dateAdded, dateUpdated: playlist.dateUpdated, ownerPeerId: playlist.owner?.peerId.toInt64(), ownerName: playlist.owner?.name, ownerPlaylistId: playlist.owner?.playlistId)
         })
         let _ = self.context.engine.itemCache.put(collectionId: ApplicationSpecificItemCacheCollectionId.music, id: MusicCacheKey.playlists.buffer, item: stored).startStandalone()
     }
@@ -1009,11 +1032,71 @@ final class MusicLibrary {
         if let playlist = self.playlists.first(where: { $0.id == id }) {
             return playlist
         }
-        if isMusicDemoBuild {
-            // A demo friend's playlist shared into a chat: not the account's, so it is not in the list.
-            return MusicDemo.foreignPlaylist(id: id, library: self)
+        if let opened = self.openedForeignPlaylists[id] {
+            // Saved to Music since it was opened: screens and the queue started from it follow the saved copy.
+            return self.savedPlaylist(owner: opened.playlist.owner) ?? opened.playlist
         }
         return nil
+    }
+
+    // MARK: Other users' playlists
+
+    /// Another user's playlists opened from their messages and not saved to Music, by a negative local id: they
+    /// live as long as the library and never enter the Playlists list.
+    private var openedForeignPlaylists: [Int: (playlist: MusicPlaylist, files: [TelegramMediaFile])] = [:]
+
+    private func savedPlaylist(owner: MusicPlaylistOwner?) -> MusicPlaylist? {
+        guard let owner else {
+            return nil
+        }
+        return self.playlists.first(where: { $0.owner?.peerId == owner.peerId && $0.owner?.playlistId == owner.playlistId })
+    }
+
+    /// The playlist a message from another user carries: the copy saved to Music when there is one, otherwise the
+    /// message's own playlist, which plays without being added.
+    func foreignPlaylist(owner: MusicPlaylistOwner, title: String, description: String, cover: TelegramMediaImageRepresentation?, files: [TelegramMediaFile]) -> MusicPlaylist {
+        if let saved = self.savedPlaylist(owner: owner) {
+            return saved
+        }
+        let id = self.openedForeignPlaylists.first(where: { $0.value.playlist.owner?.peerId == owner.peerId && $0.value.playlist.owner?.playlistId == owner.playlistId })?.key ?? -(self.openedForeignPlaylists.count + 1)
+        let now = Int32(Date().timeIntervalSince1970)
+        let playlist = MusicPlaylist(id: id, title: title, description: description, isFavorite: false, trackIds: [], cover: cover, dateAdded: now, dateUpdated: now, owner: owner)
+        self.openedForeignPlaylists[id] = (playlist, files)
+        return playlist
+    }
+
+    /// Whether the playlist is another user's that is not in Music yet: it offers Add to Music instead of the
+    /// actions of a playlist of one's own.
+    func canSaveToMusic(_ playlist: MusicPlaylist) -> Bool {
+        return playlist.isForeign && !self.playlists.contains(where: { $0.id == playlist.id })
+    }
+
+    /// Puts another user's playlist in Music with its tracks; it stays theirs, so it is still not editable.
+    /// Its cover is kept when it is a file of this device, as covers picked here are.
+    @discardableResult
+    func saveToMusic(playlistId: Int) -> MusicPlaylist? {
+        guard let opened = self.openedForeignPlaylists[playlistId] else {
+            return self.playlists.first(where: { $0.id == playlistId })
+        }
+        if let saved = self.savedPlaylist(owner: opened.playlist.owner) {
+            return saved
+        }
+        for file in opened.files where self.playlistTrack(fileId: file.fileId.id) == nil {
+            self.addToMusic(file: file)
+        }
+        let trackIds = opened.files.compactMap { self.playlistTrack(fileId: $0.fileId.id)?.message.id }
+        let now = Int32(Date().timeIntervalSince1970)
+        let cover = opened.playlist.cover.flatMap { $0.resource is LocalFileMediaResource ? $0 : nil }
+        let playlist = MusicPlaylist(id: (self.playlists.map(\.id).max() ?? -1) + 1, title: opened.playlist.title, description: opened.playlist.description, isFavorite: false, trackIds: trackIds, cover: cover, dateAdded: now, dateUpdated: now, owner: opened.playlist.owner)
+        self.playlists.append(playlist)
+        self.storePlaylists()
+        self.notifyUpdated()
+        return playlist
+    }
+
+    /// A track of Music by its file, whatever the chosen source chats: what a playlist can hold.
+    private func playlistTrack(fileId: Int64) -> MusicTrack? {
+        return self.playlistTracks.first(where: { $0.file?.fileId.id == fileId })
     }
 
     @discardableResult
@@ -1064,6 +1147,19 @@ final class MusicLibrary {
     /// Tracks in the playlist's own order; a track that left the music leaves the playlist's list too. The chosen
     /// source chats do not apply: they decide what Music lists, not what a playlist holds.
     func tracks(of playlist: MusicPlaylist) -> [MusicTrack] {
+        if let opened = self.openedForeignPlaylists[playlist.id] {
+            // Another user's playlist not in Music: a track Music has plays from there, any other from the message,
+            // listed under the id it would take once added.
+            var byFileId: [Int64: MusicTrack] = [:]
+            for track in self.playlistTracks {
+                if let fileId = track.file?.fileId.id, byFileId[fileId] == nil {
+                    byFileId[fileId] = track
+                }
+            }
+            return opened.files.map { file in
+                return byFileId[file.fileId.id] ?? MusicTrack(message: self.addedFileMessage(AddedFile(file: file, timestamp: playlist.dateAdded)), isSaved: false)
+            }
+        }
         let tracks = self.playlistTracks
         var byId: [EngineMessage.Id: MusicTrack] = [:]
         for track in tracks {
@@ -1907,7 +2003,10 @@ func musicDemoWriteLibraryState(context: AccountContext, playlists: [MusicDemo.P
             cover: playlist.coverFileId.flatMap { MusicStoredPlaylists.Cover(fileId: $0, width: 600, height: 600) },
             coverEmoji: nil,
             dateAdded: now - Int32(playlists.count - index) * 86400,
-            dateUpdated: now - Int32(playlists.count - index) * 86400
+            dateUpdated: now - Int32(playlists.count - index) * 86400,
+            ownerPeerId: nil,
+            ownerName: nil,
+            ownerPlaylistId: nil
         )
     })
     let collectionId = ApplicationSpecificItemCacheCollectionId.music
